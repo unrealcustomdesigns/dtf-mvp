@@ -148,4 +148,5 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
 
   // 2) Add transparent margin around the model output to avoid “edge cuts”
-  const padded = await step('pad_margin', () => padTransparentPng(basePng, MARGIN_FRAC
+const padded = await step('pad_margin', () => padTransparentPng(basePng, MARGIN_FRACTION));
+
