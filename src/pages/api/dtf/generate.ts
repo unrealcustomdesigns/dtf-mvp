@@ -61,14 +61,53 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
 // ---------- PNGJS fallback (pure JS) ----------
 async function resizeCoverWithPngjs(pngBuf: Buffer, targetW: number, targetH: number): Promise<Buffer> {
   const { PNG } = await import('pngjs');
-  const src = PNG.sync.read(pngBuf);
+  const src = PNG.sync.read(pngBuf); // {width,height,data: RGBA}
 
   const scale = Math.max(targetW / src.width, targetH / src.height);
   const scaledW = Math.max(1, Math.round(src.width * scale));
   const scaledH = Math.max(1, Math.round(src.height * scale));
 
+  // Bilinear scale
   const scaled = new PNG({ width: scaledW, height: scaledH });
   const sData = src.data, dData = scaled.data;
+  for (let y = 0; y < scaledH; y++) {
+    const gy = (y + 0.5) / scale - 0.5;
+    const y0 = Math.max(0, Math.floor(gy));
+    const y1 = Math.min(src.height - 1, y0 + 1);
+    const wy1 = gy - y0, wy0 = 1 - wy1;
+
+    for (let x = 0; x < scaledW; x++) {
+      const gx = (x + 0.5) / scale - 0.5;
+      const x0 = Math.max(0, Math.floor(gx));
+      const x1 = Math.min(src.width - 1, x0 + 1);
+      const wx1 = gx - x0, wx0 = 1 - wx1;
+
+      const i00 = (y0 * src.width + x0) * 4;
+      const i10 = (y0 * src.width + x1) * 4;
+      const i01 = (y1 * src.width + x0) * 4;
+      const i11 = (y1 * src.width + x1) * 4;
+      const di  = (y * scaledW + x) * 4;
+
+      for (let c = 0; c < 4; c++) {
+        const v0 = sData[i00 + c] * wx0 + sData[i10 + c] * wx1;
+        const v1 = sData[i01 + c] * wx0 + sData[i11 + c] * wx1;
+        dData[di + c] = Math.round(v0 * wy0 + v1 * wy1);
+      }
+    }
+  }
+
+  // Center crop
+  const cropX = Math.max(0, Math.floor((scaledW - targetW) / 2));
+  const cropY = Math.max(0, Math.floor((scaledH - targetH) / 2));
+  const out = new PNG({ width: targetW, height: targetH });
+  for (let y = 0; y < targetH; y++) {
+    const srcStart = ((y + cropY) * scaledW + cropX) * 4;
+    const dstStart = y * targetW * 4;
+    scaled.data.copy(out.data, dstStart, srcStart, srcStart + targetW * 4);
+  }
+
+  return PNG.sync.write(out);
+}
 
   // nearest-neighbor
   for (let y = 0; y < scaledH; y++) {
