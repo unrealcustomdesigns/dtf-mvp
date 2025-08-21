@@ -9,13 +9,13 @@
     "start": "next start",
     "lint": "next lint",
     "postinstall": "npm rebuild sharp --include=optional || true && npm rebuild lightningcss --include=optional || true"
-
   },
   "engines": {
     "node": "20.x"
   },
   "dependencies": {
     "@vercel/blob": "^1.1.1",
+    "lightningcss": "^1.25.1",
     "next": "15.5.0",
     "openai": "^5.13.1",
     "react": "19.1.0",
