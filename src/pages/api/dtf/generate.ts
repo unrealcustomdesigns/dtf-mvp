@@ -25,7 +25,7 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
         `Transparent background. Clean edges. No watermark. No text.`,
       size: '1024x1024',
       n: 1
-      // NOTE: no `response_format` here — API may reject it
+      // NOTE: do NOT send response_format here; API may reject it
     }),
   });
 
@@ -76,7 +76,13 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const finalPng = await sharp({
     create: { width: finalW, height: finalH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
   })
-    .composite([{ input: resizedTrim, left: Math.round((finalW - trimW) / 2), top: Math.round((finalH - trimH) / 2) }])
+    .composite([
+      {
+        input: resizedTrim,
+        left: Math.round((finalW - trimW) / 2),
+        top: Math.round((finalH - trimH) / 2),
+      },
+    ])
     .png({ compressionLevel: 9 })
     .withMetadata({ density: dpi })
     .toBuffer();
@@ -85,7 +91,9 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const bleedPx = px(bleedIn, dpi);
   const safeInset = bleedPx + px(0.125, dpi);
   const line = (w: number, h: number, r: number, g: number, b: number, a = 0.7) =>
-    sharp({ create: { width: w, height: h, channels: 4, background: { r, g, b, alpha: a } } }).png().toBuffer();
+    sharp({ create: { width: w, height: h, channels: 4, background: { r, g, b, alpha: a } } })
+      .png()
+      .toBuffer();
 
   const proofPng = await sharp(finalPng)
     .composite([
@@ -137,6 +145,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!cleanPrompt || !wIn || !hIn) { res.status(400).json({ error: 'prompt, widthIn, heightIn are required' }); return; }
 
     const out = await generateDTF(cleanPrompt, wIn, hIn);
-    res.status(200).json(out); return;
+    res.status(200).json(out);
+    return;
   } catch (err: unknown) {
-    const message = err instanceo
+    const message = err instanceof Error ? err.message : 'Failed to generate';
+    console.error('[DTF API ERROR]', err);
+    res.status(500).json({ error: message });
+    return;
+  }
+}
