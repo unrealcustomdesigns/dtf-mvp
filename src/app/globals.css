@@ -1,21 +1,15 @@
-/* Tailwind layers (required) */
+/* Tailwind layers */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Global styles (no custom fonts; works without next/font) */
+/* Theme variables */
 :root {
-  --background: #ffffff;
-  --foreground: #111827; /* slate-900 */
+  --background: #F7F7F8; /* ChatGPT-like light gray */
+  --foreground: #000000; /* black text */
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-  --background: #F7F7F8;   /* ChatGPT-like light gray */
-  --foreground: #000000;   /* ensure text is black */
-}
-
-/* keep light mode even if user prefers dark */
+/* Keep same light theme even in dark mode */
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #F7F7F8;
@@ -23,14 +17,8 @@
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-}
-
-html, body {
-  height: 100%;
-}
+/* Base elements */
+html, body { height: 100%; }
 
 body {
   background: var(--background);
@@ -42,23 +30,12 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
-}
+a { color: inherit; text-decoration: none; }
 
 img, svg, video, canvas, audio, iframe, embed, object {
   display: block;
   max-width: 100%;
 }
 
-/* Buttons: subtle disabled state */
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-/* Make form controls look consistent */
-input, textarea, select, button {
-  font: inherit;
-}
+button:disabled { opacity: 0.6; cursor: not-allowed; }
+input, textarea, select, button { font: inherit; }
