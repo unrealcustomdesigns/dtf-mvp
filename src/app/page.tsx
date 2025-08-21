@@ -18,37 +18,48 @@ export default function Home() {
   const pxWithBleed = (n: number) => Math.round((n + 2 * bleedIn) * dpi);
 
   async function generate() {
-    if (!prompt) return;
-    setStatus('working');
-    setProofUrl(undefined);
-    setFinalUrl(undefined);
+  if (!prompt) return;
+  setStatus('working');
+  setProofUrl(undefined);
+  setFinalUrl(undefined);
 
+  try {
+    const res = await fetch('/api/dtf/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, widthIn: Number(widthIn), heightIn: Number(heightIn) }),
+    });
+
+    // Read as text first (sometimes error pages aren’t JSON)
+    const text = await res.text();
+    let data: { proofUrl?: string; finalUrl?: string; error?: string } = {};
     try {
-      const res = await fetch('/api/dtf/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt,
-          widthIn: Number(widthIn),
-          heightIn: Number(heightIn),
-        }),
-      });
-
-      const json = await res.json();
-      if (res.ok) {
-        setProofUrl(json.proofUrl);
-        setFinalUrl(json.finalUrl);
-        setStatus('done');
-      } else {
-        alert(json.error || 'Something went wrong');
-        setStatus('error');
-      }
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : 'Network error';
-      alert(message);
-      setStatus('error');
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { error: text?.slice(0, 300) || 'Non-JSON response from server' };
     }
+
+    if (!res.ok) {
+      alert(data.error || `HTTP ${res.status}: ${text?.slice(0, 200)}`);
+      setStatus('error');
+      return;
+    }
+
+    if (!data.proofUrl || !data.finalUrl) {
+      alert('Generation failed: missing URLs in response.');
+      setStatus('error');
+      return;
+    }
+
+    setProofUrl(data.proofUrl);
+    setFinalUrl(data.finalUrl);
+    setStatus('done');
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'Network error';
+    alert(message);
+    setStatus('error');
   }
+}
 
   return (
     <div className="max-w-2xl mx-auto p-6 space-y-6">
