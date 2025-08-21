@@ -66,7 +66,7 @@ export default function Home() {
       <h1 className="text-2xl font-semibold">DTF Image Generator (Print-Ready)</h1>
 
       <label className="block">
-        <span className="text-sm font-medium">Prompt</span>
+        <span className="text-black font-medium">Prompt</span>
         <textarea
           className="mt-1 w-full border rounded p-2"
           rows={4}
@@ -78,7 +78,7 @@ export default function Home() {
 
       <div className="grid grid-cols-2 gap-4">
         <label className="block">
-          <span className="text-sm font-medium">Width (inches)</span>
+          <span className="text-black font-medium">Width (inches)</span>
           <input
             type="number"
             min={1}
@@ -89,7 +89,7 @@ export default function Home() {
           />
         </label>
         <label className="block">
-          <span className="text-sm font-medium">Height (inches)</span>
+          <span className="text-black font-medium">Height (inches)</span>
           <input
             type="number"
             min={1}
@@ -101,7 +101,7 @@ export default function Home() {
         </label>
       </div>
 
-     <div className="text-xs text-gray-600">
+     <div className="text-xs text-black">
   <div><strong>DPI:</strong> 300 (pixels shown are trim size; no bleed)</div>
   <div className="mt-1">
     Trim: {px(widthIn)} × {px(heightIn)} px
