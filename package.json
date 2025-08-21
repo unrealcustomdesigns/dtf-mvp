@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": "20.x" },
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -32,9 +34,9 @@
     "typescript": "^5.5.4"
   },
   "optionalDependencies": {
-    "@img/sharp-linux-x64": "*",
     "@img/sharp-libvips-linux-x64": "*",
-    "@img/sharp-linuxmusl-x64": "*",
-    "@img/sharp-libvips-linuxmusl-x64": "*"
+    "@img/sharp-libvips-linuxmusl-x64": "*",
+    "@img/sharp-linux-x64": "*",
+    "@img/sharp-linuxmusl-x64": "*"
   }
 }
