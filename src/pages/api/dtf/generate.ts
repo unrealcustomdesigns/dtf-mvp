@@ -26,10 +26,7 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
 
   const resp = await fetch('https://api.openai.com/v1/images/generations', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: 'gpt-image-1',
       prompt: `${prompt}\nTransparent background. Clean edges. No watermark. No text.`,
@@ -41,10 +38,7 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
   const text = await resp.text();
   if (!resp.ok) {
     let msg = text;
-    try {
-      const j = JSON.parse(text);
-      msg = j?.error?.message || text;
-    } catch {}
+    try { msg = (JSON.parse(text)?.error?.message) || msg; } catch {}
     throw new Error(`OpenAI error (${resp.status}): ${msg}`);
   }
 
@@ -64,6 +58,28 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
   throw new Error('OpenAI image had neither b64_json nor url');
 }
 
+// ---------- image-js types & guards (no any) ----------
+type ImageJsImage = {
+  width: number;
+  height: number;
+  resize(opts: { width?: number; height?: number }): ImageJsImage;
+  crop(opts: { x: number; y: number; width: number; height: number }): ImageJsImage;
+  toBuffer(opts: { format: 'png' }): Uint8Array | Buffer;
+};
+type ImageJsLoader = { load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImageJsImage> };
+type ImageJsModuleShape =
+  | { Image: ImageJsLoader }
+  | { default: ImageJsLoader }
+  | { default: { Image: ImageJsLoader } }
+  | { default?: unknown; Image?: unknown };
+
+function hasLoad(x: unknown): x is ImageJsLoader {
+  return typeof x === 'object' && x !== null && 'load' in x && typeof (x as { load: unknown }).load === 'function';
+}
+function hasImageLoader(x: unknown): x is { Image: ImageJsLoader } {
+  return typeof x === 'object' && x !== null && 'Image' in x && hasLoad((x as { Image: unknown }).Image);
+}
+
 // ---------- core ----------
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const dpi = 300;
@@ -77,16 +93,7 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   // 1) Generate base PNG from OpenAI
   const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
 
-  // 2) Normalize + resize; use image-js fallback if Sharp errors
-  type ImageJsImage = {
-    width: number; height: number;
-    resize(opts: { width?: number; height?: number }): ImageJsImage;
-    crop(opts: { x: number; y: number; width: number; height: number }): ImageJsImage;
-    toBuffer(opts: { format: 'png' }): Uint8Array | Buffer;
-  };
-  type ImageJsLoader = { load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImageJsImage> };
-  type ImageJsModuleShape = { Image?: ImageJsLoader } & { default?: ImageJsLoader | { Image?: ImageJsLoader } };
-
+  // 2) Normalize + resize; fall back to image-js if Sharp errors
   const resizedTrim = await step('sharp_resize', async () => {
     if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
       throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
@@ -95,22 +102,25 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
     try {
       // Normalize model output to plain RGBA PNG first
       const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
-      // Strict two-arg resize (no options object to avoid boolean-parsing edge cases)
+      // Strict two-arg resize (no options object)
       return await sharp(normalized).resize(trimW, trimH).toBuffer();
     } catch (e) {
-      console.warn('[DTF] sharp resize failed, falling back to image-js:', e instanceof Error ? e.message : e);
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn('[DTF] sharp resize failed, falling back to image-js:', msg);
 
       // Pure-JS fallback (no native bindings)
-      const mod = (await import('image-js')) as unknown as ImageJsModuleShape;
-      const ImageCls: ImageJsLoader | undefined =
-        mod.Image ??
-        (typeof (mod.default as any)?.load === 'function'
-          ? (mod.default as ImageJsLoader)
-          : (mod.default as any)?.Image);
+      const modUnknown = (await import('image-js')) as unknown as ImageJsModuleShape;
 
-      if (!ImageCls || typeof ImageCls.load !== 'function') {
-        throw new Error('image-js export shape not recognized (no Image.load)');
+      let ImageCls: ImageJsLoader | undefined;
+      if (hasImageLoader(modUnknown)) {
+        ImageCls = modUnknown.Image;
+      } else if ('default' in modUnknown && modUnknown.default) {
+        const def = (modUnknown as { default: unknown }).default;
+        if (hasLoad(def)) ImageCls = def;
+        else if (hasImageLoader(def)) ImageCls = (def as { Image: ImageJsLoader }).Image;
       }
+
+      if (!ImageCls) throw new Error('image-js export shape not recognized (no Image.load)');
 
       const img = await ImageCls.load(basePng);
 
@@ -134,13 +144,7 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
     sharp({
       create: { width: finalW, height: finalH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
     })
-      .composite([
-        {
-          input: resizedTrim,
-          left: Math.round((finalW - trimW) / 2),
-          top: Math.round((finalH - trimH) / 2),
-        },
-      ])
+      .composite([{ input: resizedTrim, left: Math.round((finalW - trimW) / 2), top: Math.round((finalH - trimH) / 2) }])
       .png({ compressionLevel: 9 })
       .withMetadata({ density: dpi })
       .toBuffer()
