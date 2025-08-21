@@ -25,12 +25,12 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// ---------- image generation (Nebius: flux-dev) ----------
+// ---------- image generation (Nebius: black-forest-labs/flux-dev) ----------
 async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]> {
   // Nebius (OpenAI-compatible)
   const host  = process.env.NEBIUS_BASE_URL || 'https://api.studio.nebius.ai';
   const key   = process.env.NEBIUS_API_KEY;
-  const model = process.env.NEBIUS_IMAGE_MODEL || 'flux-dev';
+  const model = process.env.NEBIUS_IMAGE_MODEL || 'black-forest-labs/flux-dev';
   if (!key) throw new Error('NEBIUS_API_KEY is missing');
 
   const resp = await fetch(`${host}/v1/images/generations`, {
