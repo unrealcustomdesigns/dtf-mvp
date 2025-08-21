@@ -2,6 +2,16 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import sharp from 'sharp';
 import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
+type JimpImage = {
+  resize: (w: number, h: number) => JimpImage;
+  cover?: (w: number, h: number) => JimpImage;
+  getBufferAsync: (mime: string) => Promise<Buffer>;
+};
+
+type JimpModule = {
+  read: (data: Buffer) => Promise<JimpImage>;
+  MIME_PNG: string;
+};
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 
@@ -75,33 +85,29 @@ if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <=
 }
 // 2) Normalize + resize; fall back to Jimp if Sharp errors
 const resizedTrim = await step('sharp_resize', async () => {
-  // sanity check on dimensions
   if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
     throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
   }
 
   try {
-    // Normalize to plain PNG RGBA first
+    // Normalize to plain RGBA PNG first
     const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
+
     // Strict two-arg resize (no options object)
     return await sharp(normalized).resize(trimW, trimH).toBuffer();
-  } catch (e) {
-    console.warn('[DTF] sharp resize failed, falling back to Jimp:', e instanceof Error ? e.message : e);
-    // Dynamic import so we don't need a top-level import
-    const JimpMod = await import('jimp');
-    const Jimp: any = (JimpMod as any).default ?? (JimpMod as any);
-    const img = await Jimp.read(basePng);
-    if (typeof img.cover === 'function') {
-      img.cover(trimW, trimH); // preserves aspect ratio, crops like Sharp's fit:'cover'
-    } else {
-      img.resize(trimW, trimH); // minimal fallback if cover doesn't exist
-    }
-    return await img.getBufferAsync(Jimp.MIME_PNG);
+  } catch {
+    console.warn('[DTF] sharp resize failed, falling back to Jimp');
+
+    // Dynamic import with types; no `any`
+    const J = (await import('jimp')) as unknown as JimpModule;
+    const img = await J.read(basePng);
+
+    if (img.cover) img.cover(trimW, trimH); // like Sharp fit:'cover'
+    else img.resize(trimW, trimH);           // basic fallback
+
+    return await img.getBufferAsync(J.MIME_PNG);
   }
 });
-
-
-
 
   // 3) Add bleed + 300 DPI
   const finalPng = await step('sharp_bleed', () =>
