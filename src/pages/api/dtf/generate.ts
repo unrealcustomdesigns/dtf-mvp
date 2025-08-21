@@ -58,35 +58,49 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
   throw new Error('OpenAI image had neither b64_json nor url');
 }
 
-// ---------- Jimp types & guards ----------
-type JimpImage = {
-  width?: number; height?: number; // Jimp doesn’t always expose directly
-  cover?: (w: number, h: number) => JimpImage;
-  resize: (w: number, h: number) => JimpImage;
-  getBufferAsync: (mime: string) => Promise<Buffer>;
-};
-type JimpLike = {
-  read?: (data: Buffer) => Promise<JimpImage>;
-  MIME_PNG?: string;
-};
-type JimpModuleShape =
-  | { default: JimpLike }
-  | { read: (data: Buffer) => Promise<JimpImage>; MIME_PNG?: string }
-  | Record<string, unknown>;
+// ---------- PNGJS fallback (pure JS) ----------
+async function resizeCoverWithPngjs(pngBuf: Buffer, targetW: number, targetH: number): Promise<Buffer> {
+  const { PNG } = await import('pngjs'); // dynamic import to avoid TS/CJS quirks
+  const src = PNG.sync.read(pngBuf);     // decode PNG → {width,height,data:RGBA}
 
-function pickJimp(mod: JimpModuleShape): JimpLike | null {
-  if (mod && typeof mod === 'object') {
-    // ESM default export
-    if ('default' in mod && mod.default && typeof (mod as { default: unknown }).default === 'object') {
-      const def = (mod as { default: JimpLike }).default;
-      if (typeof def.read === 'function') return def;
-    }
-    // CJS‐like direct export
-    if ('read' in mod && typeof (mod as JimpLike).read === 'function') {
-      return mod as unknown as JimpLike;
+  const scale = Math.max(targetW / src.width, targetH / src.height);
+  const scaledW = Math.max(1, Math.round(src.width * scale));
+  const scaledH = Math.max(1, Math.round(src.height * scale));
+
+  // Nearest-neighbor upscale (fast & sufficient for AI art edges)
+  const scaled = new PNG({ width: scaledW, height: scaledH });
+  const sData = src.data, dData = scaled.data;
+  for (let y = 0; y < scaledH; y++) {
+    const sy = Math.min(src.height - 1, Math.floor(y / scale));
+    for (let x = 0; x < scaledW; x++) {
+      const sx = Math.min(src.width - 1, Math.floor(x / scale));
+      const si = (sy * src.width + sx) * 4;
+      const di = (y * scaledW + x) * 4;
+      dData[di]     = sData[si];
+      dData[di + 1] = sData[si + 1];
+      dData[di + 2] = sData[si + 2];
+      dData[di + 3] = sData[si + 3];
     }
   }
-  return null;
+
+  // Center-crop to target
+  const cropX = Math.max(0, Math.floor((scaledW - targetW) / 2));
+  const cropY = Math.max(0, Math.floor((scaledH - targetH) / 2));
+  const cropped = new PNG({ width: targetW, height: targetH });
+  for (let y = 0; y < targetH; y++) {
+    for (let x = 0; x < targetW; x++) {
+      const sx = x + cropX, sy = y + cropY;
+      const si = (sy * scaledW + sx) * 4;
+      const di = (y * targetW + x) * 4;
+      const sd = scaled.data, dd = cropped.data;
+      dd[di]     = sd[si];
+      dd[di + 1] = sd[si + 1];
+      dd[di + 2] = sd[si + 2];
+      dd[di + 3] = sd[si + 3];
+    }
+  }
+
+  return PNG.sync.write(cropped); // encode back to PNG (Buffer)
 }
 
 // ---------- core ----------
@@ -99,42 +113,26 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const finalW = px(widthIn + 2 * bleedIn, dpi);
   const finalH = px(heightIn + 2 * bleedIn, dpi);
 
-  // 1) Base image
+  // 1) Base PNG from OpenAI
   const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
 
-  // 2) Resize (Sharp → Jimp fallback)
+  // 2) Normalize + resize (Sharp → PNGJS fallback)
   const resizedTrim = await step('sharp_resize', async () => {
     if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
       throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
     }
 
-    // Try Sharp first (no options objects anywhere)
+    // Try Sharp first with zero options objects anywhere
     try {
       const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
       return await sharp(normalized).resize(trimW, trimH).toBuffer();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn('[DTF] sharp resize failed, falling back to Jimp:', msg);
+      console.warn('[DTF] sharp resize failed, falling back to PNGJS:', msg);
     }
 
-    // Jimp fallback (pure JS)
-    const jimpMod = (await import('jimp')) as unknown as JimpModuleShape;
-    const J = pickJimp(jimpMod);
-    if (!J || typeof J.read !== 'function') {
-      throw new Error('jimp export shape not recognized (no read)');
-    }
-
-    const img = await J.read(basePng);
-
-    // Prefer "cover" if available (similar to Sharp fit:'cover'); else basic resize
-    if (typeof img.cover === 'function') {
-      img.cover(trimW, trimH);
-    } else {
-      img.resize(trimW, trimH);
-    }
-
-    const mime = (J.MIME_PNG && typeof J.MIME_PNG === 'string') ? J.MIME_PNG : 'image/png';
-    return await img.getBufferAsync(mime);
+    // PNG-only fallback (no native code)
+    return await resizeCoverWithPngjs(basePng, trimW, trimH);
   });
 
   // 3) Add bleed + set 300 DPI (final PNG)
