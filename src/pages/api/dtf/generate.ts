@@ -73,20 +73,33 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
 if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
   throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
 }
-import Jimp from 'jimp';
-
-// 2) Normalize + resize with Jimp fallback if Sharp balks
+// 2) Normalize + resize; fall back to Jimp if Sharp errors
 const resizedTrim = await step('sharp_resize', async () => {
+  // sanity check on dimensions
+  if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
+    throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
+  }
+
   try {
+    // Normalize to plain PNG RGBA first
     const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
+    // Strict two-arg resize (no options object)
     return await sharp(normalized).resize(trimW, trimH).toBuffer();
   } catch (e) {
     console.warn('[DTF] sharp resize failed, falling back to Jimp:', e instanceof Error ? e.message : e);
+    // Dynamic import so we don't need a top-level import
+    const JimpMod = await import('jimp');
+    const Jimp: any = (JimpMod as any).default ?? (JimpMod as any);
     const img = await Jimp.read(basePng);
-    img.resize(trimW, trimH, Jimp.RESIZE_BILINEAR);
+    if (typeof img.cover === 'function') {
+      img.cover(trimW, trimH); // preserves aspect ratio, crops like Sharp's fit:'cover'
+    } else {
+      img.resize(trimW, trimH); // minimal fallback if cover doesn't exist
+    }
     return await img.getBufferAsync(Jimp.MIME_PNG);
   }
 });
+
 
 
 
