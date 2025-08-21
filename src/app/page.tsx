@@ -97,7 +97,7 @@ export default function Home() {
         </label>
       </div>
 
-      <div className="text-xs">
+      <div className="text-2xl font-semibold text-white">
         <div><strong>DPI:</strong> 300 (pixels shown are trim size; no bleed)</div>
         <div className="mt-1">Trim: {px(widthIn)} × {px(heightIn)} px</div>
       </div>
