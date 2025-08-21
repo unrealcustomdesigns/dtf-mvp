@@ -71,12 +71,20 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   // 1) Generate
   const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
 
- // 2) Resize to trim (avoid intermediate PNG encode)
-const resizedTrim = await step('sharp_resize', () =>
-  sharp(basePng)
-    .resize(trimW, trimH, { fit: 'cover', fastShrinkOnLoad: true })
-    .toBuffer()
-);
+// 2) Normalize, then resize to trim (no options passed to resize)
+const resizedTrim = await step('sharp_resize', async () => {
+  // Normalize the generated image to a plain PNG RGBA buffer first
+  const normalized = await sharp(basePng, { failOn: 'none' })
+    .ensureAlpha()          // guarantee 4 channels
+    .toFormat('png')        // strip palette/animation/odd flags
+    .toBuffer();
+
+  // Now resize without any options object (avoids boolean parsing edge-cases)
+  return await sharp(normalized)
+    .resize(trimW, trimH)   // <-- no options object, no .png() here
+    .toBuffer();
+});
+
 
 
   // 3) Add bleed + 300 DPI
