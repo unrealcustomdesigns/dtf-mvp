@@ -123,13 +123,14 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
     }
   });
 
-  // 3) Stamp 300 DPI (no overlays)
-  const finalPng = await step('stamp_dpi', () =>
-    sharp(resizedTrim)
-      .png({ compressionLevel: 9 })
-      .withMetadata({ density: Number(dpi) })
-      .toBuffer()
-  );
+// 3) Finalize (no DPI stamping to avoid Sharp quirk)
+const finalPng = await step('finalize', async () => {
+  // resizedTrim is already an exact-trim PNG Buffer
+  if (!Buffer.isBuffer(resizedTrim) || resizedTrim.length === 0) {
+    throw new Error('resizedTrim_not_buffer');
+  }
+  return resizedTrim;
+});
 
   // 4) Proof = Final (no bleed/safe lines)
   const proofPng = await step('proof_passthrough', async () => finalPng);
