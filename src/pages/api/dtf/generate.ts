@@ -1,14 +1,45 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import OpenAI from 'openai';
 import sharp from 'sharp';
 import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // inches → pixels at 300 DPI
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
+
+async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw new Error('OPENAI_API_KEY is missing');
+
+  const resp = await fetch('https://api.openai.com/v1/images/generations', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'gpt-image-1',
+      prompt:
+        `${prompt}\n` +
+        `Transparent background. Clean edges. No watermark. No text.`,
+      size: '1024x1024',          // we’ll upscale/crop to exact inches next
+      response_format: 'b64_json' // force base64 to avoid URL fetch path
+    })
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) {
+    let msg = text;
+    try { const j = JSON.parse(text); msg = j.error?.message || text; } catch {}
+    throw new Error(`OpenAI error (${resp.status}): ${msg}`);
+  }
+
+  const data = JSON.parse(text);
+  const b64 = data?.data?.[0]?.b64_json;
+  if (!b64) throw new Error('OpenAI response missing b64_json');
+  return Buffer.from(b64, 'base64');
+}
 
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const dpi = 300;
@@ -19,31 +50,10 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const finalW = px(widthIn + 2 * bleedIn, dpi);
   const finalH = px(heightIn + 2 * bleedIn, dpi);
 
-  // 1) Base image (omit background option; put "transparent background" in prompt)
-  const gen = await openai.images.generate({
-    model: 'gpt-image-1',
-    prompt:
-      `${prompt}\n` +
-      `Style: clean edges, no watermark, no text.\n` +
-      `Transparent background.`,
-    size: '1024x1024'
-  });
+  // 1) Base image (REST path, not SDK)
+  const basePng = await generateBasePngViaREST(prompt);
 
-  const first = Array.isArray(gen.data) ? gen.data[0] : undefined;
-  if (!first) throw new Error('Image generation returned no data');
-
-  let basePng: Buffer;
-  if (first.b64_json) {
-    basePng = Buffer.from(first.b64_json, 'base64');
-  } else if (first.url) {
-    const resp = await fetch(first.url);
-    if (!resp.ok) throw new Error(`Failed to fetch image URL (HTTP ${resp.status})`);
-    basePng = Buffer.from(await resp.arrayBuffer());
-  } else {
-    throw new Error('Image generation had neither b64_json nor url');
-  }
-
-  // 2) Resize to trim, add bleed, set 300 DPI
+  // 2) Resize to exact trim, then add bleed canvas + 300 DPI
   const resizedTrim = await sharp(basePng)
     .resize({ width: trimW, height: trimH, fit: 'cover' })
     .png()
@@ -102,8 +112,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
 
   try {
-    if (!process.env.OPENAI_API_KEY) { res.status(500).json({ error: 'OPENAI_API_KEY is missing' }); return; }
-
     const { prompt, widthIn, heightIn } = (req.body ?? {}) as {
       prompt?: string; widthIn?: number; heightIn?: number;
     };
@@ -111,6 +119,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const cleanPrompt = (prompt ?? '').trim();
     const wIn = Number(widthIn);
     const hIn = Number(heightIn);
+    if (!process.env.OPENAI_API_KEY) { res.status(500).json({ error: 'OPENAI_API_KEY is missing' }); return; }
     if (!cleanPrompt || !wIn || !hIn) { res.status(400).json({ error: 'prompt, widthIn, heightIn are required' }); return; }
 
     const out = await generateDTF(cleanPrompt, wIn, hIn);
