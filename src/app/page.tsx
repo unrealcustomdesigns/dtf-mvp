@@ -2,41 +2,50 @@
 
 import { useState } from 'react';
 
+type Status = 'idle' | 'working' | 'done' | 'error';
+
 export default function Home() {
   const [prompt, setPrompt] = useState('');
-  const [widthIn, setWidthIn] = useState(11);
-  const [heightIn, setHeightIn] = useState(11);
-  const [status, setStatus] = useState<'idle'|'working'|'done'|'error'>('idle');
+  const [widthIn, setWidthIn] = useState<number>(11);
+  const [heightIn, setHeightIn] = useState<number>(11);
+  const [status, setStatus] = useState<Status>('idle');
   const [proofUrl, setProofUrl] = useState<string>();
   const [finalUrl, setFinalUrl] = useState<string>();
 
   const dpi = 300;
   const bleedIn = 0.125;
-  const px = (n:number)=> Math.round(n * dpi);
-  const pxWithBleed = (n:number)=> Math.round((n + 2*bleedIn) * dpi);
+  const px = (n: number) => Math.round(n * dpi);
+  const pxWithBleed = (n: number) => Math.round((n + 2 * bleedIn) * dpi);
 
   async function generate() {
+    if (!prompt) return;
     setStatus('working');
-    setProofUrl(undefined); 
+    setProofUrl(undefined);
     setFinalUrl(undefined);
 
-    const res = await fetch('/api/dtf/generate', {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify({
-        prompt,
-        widthIn: Number(widthIn),
-        heightIn: Number(heightIn)
-      })
-    });
+    try {
+      const res = await fetch('/api/dtf/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          widthIn: Number(widthIn),
+          heightIn: Number(heightIn),
+        }),
+      });
 
-    const json = await res.json();
-    if (res.ok) {
-      setProofUrl(json.proofUrl);
-      setFinalUrl(json.finalUrl);
-      setStatus('done');
-    } else {
-      alert(json.error || 'Something went wrong');
+      const json = await res.json();
+      if (res.ok) {
+        setProofUrl(json.proofUrl);
+        setFinalUrl(json.finalUrl);
+        setStatus('done');
+      } else {
+        alert(json.error || 'Something went wrong');
+        setStatus('error');
+      }
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Network error';
+      alert(message);
       setStatus('error');
     }
   }
@@ -52,7 +61,7 @@ export default function Home() {
           rows={4}
           placeholder="Vector-style bulldog mascot, bold outlines, no text, transparent background"
           value={prompt}
-          onChange={e=>setPrompt(e.target.value)}
+          onChange={(e) => setPrompt(e.target.value)}
         />
       </label>
 
@@ -60,45 +69,54 @@ export default function Home() {
         <label className="block">
           <span className="text-sm font-medium">Width (inches)</span>
           <input
-            type="number" min={1} step="0.5"
+            type="number"
+            min={1}
+            step="0.5"
             className="mt-1 w-full border rounded p-2"
             value={widthIn}
-            onChange={e=>setWidthIn(Number(e.target.value))}
+            onChange={(e) => setWidthIn(Number(e.target.value))}
           />
         </label>
         <label className="block">
           <span className="text-sm font-medium">Height (inches)</span>
           <input
-            type="number" min={1} step="0.5"
+            type="number"
+            min={1}
+            step="0.5"
             className="mt-1 w-full border rounded p-2"
             value={heightIn}
-            onChange={e=>setHeightIn(Number(e.target.value))}
+            onChange={(e) => setHeightIn(Number(e.target.value))}
           />
         </label>
       </div>
 
       <div className="text-xs text-gray-600">
-  <div><strong>DPI:</strong> 300 &nbsp; <strong>Bleed:</strong> 0.125&quot;</div>
-  <div className="mt-1">
-    Trim: {px(widthIn)} × {px(heightIn)} px &nbsp;|&nbsp;
-    Final (with bleed): {pxWithBleed(widthIn)} × {pxWithBleed(heightIn)} px
-  </div>
-</div>
+        <div>
+          <strong>DPI:</strong> 300 &nbsp; <strong>Bleed:</strong> 0.125&quot;
+        </div>
+        <div className="mt-1">
+          Trim: {px(widthIn)} × {px(heightIn)} px &nbsp;|&nbsp; Final (with bleed): {pxWithBleed(widthIn)} × {pxWithBleed(heightIn)} px
+        </div>
+      </div>
 
       <button
         className="bg-black text-white rounded px-4 py-2"
         onClick={generate}
-        disabled={!prompt || status==='working'}
+        disabled={!prompt || status === 'working'}
       >
-        {status==='working' ? 'Generating…' : 'Generate'}
+        {status === 'working' ? 'Generating…' : 'Generate'}
       </button>
 
       {proofUrl && (
         <div className="border rounded p-3">
           <div className="text-sm mb-2">Proof (trim=red, safe=green)</div>
-          <img src={proofUrl} alt="DTF proof" className="max-w-full border rounded"/>
+          <img src={proofUrl} alt="DTF proof" className="max-w-full border rounded" />
           {finalUrl && (
-            <a className="inline-block mt-3 bg-emerald-600 text-white px-4 py-2 rounded" href={finalUrl} download>
+            <a
+              className="inline-block mt-3 bg-emerald-600 text-white px-4 py-2 rounded"
+              href={finalUrl}
+              download
+            >
               Download Print-Ready PNG
             </a>
           )}
