@@ -66,9 +66,9 @@ export default function Home() {
       <h1 className="text-2xl font-semibold">DTF Image Generator (Print-Ready)</h1>
 
       <label className="block">
-        <span className="text-black font-medium">Prompt</span>
-        <textarea
-          className="mt-1 w-full border rounded p-2"
+        <span className="text-sm font-medium">Prompt</span>
+     <textarea
+  className="mt-1 w-full border rounded p-2 text-black placeholder-black"
           rows={4}
           placeholder="Vector-style bulldog mascot, bold outlines, no text, transparent background"
           value={prompt}
@@ -78,9 +78,10 @@ export default function Home() {
 
       <div className="grid grid-cols-2 gap-4">
         <label className="block">
-          <span className="text-black font-medium">Width (inches)</span>
-          <input
-            type="number"
+          <span className="text-sm font-medium">Width (inches)</span>
+       <input
+  type="number"
+  className="mt-1 w-full border rounded p-2 text-black placeholder-black"
             min={1}
             step="0.5"
             className="mt-1 w-full border rounded p-2"
@@ -89,9 +90,10 @@ export default function Home() {
           />
         </label>
         <label className="block">
-          <span className="text-black font-medium">Height (inches)</span>
+          <span className="text-sm font-medium">Height (inches)</span>
           <input
-            type="number"
+  type="number"
+  className="mt-1 w-full border rounded p-2 text-black placeholder-black"
             min={1}
             step="0.5"
             className="mt-1 w-full border rounded p-2"
