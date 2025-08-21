@@ -78,12 +78,12 @@ export default function Home() {
       </div>
 
       <div className="text-xs text-gray-600">
-        <div><strong>DPI:</strong> 300 &nbsp; <strong>Bleed:</strong> 0.125"</div>
-        <div className="mt-1">
-          Trim: {px(widthIn)} × {px(heightIn)} px &nbsp;|&nbsp;
-          Final (with bleed): {pxWithBleed(widthIn)} × {pxWithBleed(heightIn)} px
-        </div>
-      </div>
+  <div><strong>DPI:</strong> 300 &nbsp; <strong>Bleed:</strong> 0.125&quot;</div>
+  <div className="mt-1">
+    Trim: {px(widthIn)} × {px(heightIn)} px &nbsp;|&nbsp;
+    Final (with bleed): {pxWithBleed(widthIn)} × {pxWithBleed(heightIn)} px
+  </div>
+</div>
 
       <button
         className="bg-black text-white rounded px-4 py-2"
