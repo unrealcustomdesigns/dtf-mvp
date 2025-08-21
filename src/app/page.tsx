@@ -56,7 +56,10 @@ export default function Home() {
 
   return (
     <div className="max-w-2xl mx-auto p-6 space-y-6 text-black">
-      <h1 className="text-2xl font-semibold">DTF Image Generator (Print-Ready)</h1>
+<h1 className="text-2xl font-semibold text-white">
+ Unreal Custom Designs DTF Image Generator (Print-Ready)
+</h1>
+
 
       <label className="block">
         <span className="text-sm font-medium">Prompt</span>
