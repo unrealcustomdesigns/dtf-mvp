@@ -58,16 +58,17 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
   throw new Error('OpenAI image had neither b64_json nor url');
 }
 
-// ---------- PNGJS fallback (pure JS), bilinear + center-crop ----------
-async function resizeCoverWithPngjs(pngBuf: Buffer, targetW: number, targetH: number): Promise<Buffer> {
+// ---------- PNGJS “contain” (no crop): bilinear + centered transparent pad ----------
+async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: number): Promise<Buffer> {
   const { PNG } = await import('pngjs');
-  const src = PNG.sync.read(pngBuf); // { width, height, data: RGBA Uint8Array }
+  const src = PNG.sync.read(pngBuf); // { width, height, data: RGBA }
 
-  const scale = Math.max(targetW / src.width, targetH / src.height);
+  // scale to fit INSIDE the box
+  const scale = Math.min(targetW / src.width, targetH / src.height);
   const scaledW = Math.max(1, Math.round(src.width * scale));
   const scaledH = Math.max(1, Math.round(src.height * scale));
 
-  // Bilinear scale
+  // bilinear scale to scaledW × scaledH
   const scaled = new PNG({ width: scaledW, height: scaledH });
   const sData = src.data, dData = scaled.data;
   for (let y = 0; y < scaledH; y++) {
@@ -96,14 +97,15 @@ async function resizeCoverWithPngjs(pngBuf: Buffer, targetW: number, targetH: nu
     }
   }
 
-  // Center crop
-  const cropX = Math.max(0, Math.floor((scaledW - targetW) / 2));
-  const cropY = Math.max(0, Math.floor((scaledH - targetH) / 2));
-  const out = new PNG({ width: targetW, height: targetH });
-  for (let y = 0; y < targetH; y++) {
-    const srcStart = ((y + cropY) * scaledW + cropX) * 4;
-    const dstStart = y * targetW * 4;
-    scaled.data.copy(out.data, dstStart, srcStart, srcStart + targetW * 4);
+  // center onto transparent canvas targetW × targetH
+  const out = new PNG({ width: targetW, height: targetH }); // zeroed → transparent
+  const offsetX = Math.max(0, Math.floor((targetW - scaledW) / 2));
+  const offsetY = Math.max(0, Math.floor((targetH - scaledH) / 2));
+
+  for (let y = 0; y < scaledH; y++) {
+    const srcStart = y * scaledW * 4;
+    const dstStart = ((y + offsetY) * targetW + offsetX) * 4;
+    scaled.data.copy(out.data, dstStart, srcStart, srcStart + scaledW * 4);
   }
 
   return PNG.sync.write(out);
@@ -119,19 +121,12 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   // 1) Base PNG
   const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
 
-  // 2) Resize to exact trim (Sharp → PNGJS fallback)
+  // 2) Resize to exact trim using "contain" (no crop) with PNGJS
   const resizedTrim = await step('resize_trim', async () => {
     if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
       throw new Error(`invalid_trim_dims: trimW=${trimW}, trimH=${trimH}`);
     }
-    try {
-      const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
-      return await sharp(normalized).resize(trimW, trimH).toBuffer();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn('[DTF] sharp resize failed, using PNGJS:', msg);
-      return await resizeCoverWithPngjs(basePng, trimW, trimH);
-    }
+    return await resizeContainWithPngjs(basePng, trimW, trimH);
   });
 
   // 3) Finalize (no DPI stamping to avoid Sharp quirk)
