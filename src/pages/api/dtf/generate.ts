@@ -70,19 +70,25 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
 
   // 1) Generate
   const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
+if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
+  throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
+}
 
-// 2) Normalize, then resize to trim (no options passed to resize)
+// 2) Normalize, then resize to trim (NO options objects anywhere)
 const resizedTrim = await step('sharp_resize', async () => {
-  // Normalize the generated image to a plain PNG RGBA buffer first
-  const normalized = await sharp(basePng, { failOn: 'none' })
-    .ensureAlpha()          // guarantee 4 channels
-    .toFormat('png')        // strip palette/animation/odd flags
+  // Log dims to be 100% sure we have valid numbers
+  console.log(`[DTF] dims trimW=${trimW} trimH=${trimH}`);
+
+  // Normalize the model output to a plain PNG buffer first (no options on constructor)
+  const normalized = await sharp(basePng)
+    .ensureAlpha()       // force RGBA
+    .toFormat('png')     // strip palettes/animation/etc.
     .toBuffer();
 
-  // Now resize without any options object (avoids boolean parsing edge-cases)
+  // Now resize using the two-arg signature ONLY (no options object)
   return await sharp(normalized)
-    .resize(trimW, trimH)   // <-- no options object, no .png() here
-    .toBuffer();
+    .resize(trimW, trimH)   // <<— strictly numbers, no 3rd-arg object
+    .toBuffer();            // we'll PNG-encode in the next step
 });
 
 
