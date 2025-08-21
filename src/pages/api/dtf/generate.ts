@@ -7,9 +7,6 @@ import { put } from '@vercel/blob';
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Allow bigger JSON bodies if needed
-export const config = { api: { bodyParser: { sizeLimit: '10mb' } } };
-
 // inches → pixels at 300 DPI
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
 
@@ -22,12 +19,14 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const finalW = px(widthIn + 2 * bleedIn, dpi);
   const finalH = px(heightIn + 2 * bleedIn, dpi);
 
-  // 1) Base image (OpenAI may return b64 or url)
+  // 1) Base image (omit background option; put "transparent background" in prompt)
   const gen = await openai.images.generate({
     model: 'gpt-image-1',
-    prompt: `${prompt}\nStyle: clean edges, no watermark, no text.\nBackground: transparent.`,
-    size: '1024x1024',
-    background: 'transparent',
+    prompt:
+      `${prompt}\n` +
+      `Style: clean edges, no watermark, no text.\n` +
+      `Transparent background.`,
+    size: '1024x1024'
   });
 
   const first = Array.isArray(gen.data) ? gen.data[0] : undefined;
@@ -94,7 +93,7 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
-  // CORS (also fine for Shopify iframe)
+  // CORS (Shopify-friendly)
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
