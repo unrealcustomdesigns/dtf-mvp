@@ -15,30 +15,44 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
   const resp = await fetch('https://api.openai.com/v1/images/generations', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${key}`,
-      'Content-Type': 'application/json'
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
     },
     body: JSON.stringify({
       model: 'gpt-image-1',
       prompt:
         `${prompt}\n` +
         `Transparent background. Clean edges. No watermark. No text.`,
-      size: '1024x1024',          // we’ll upscale/crop to exact inches next
-      response_format: 'b64_json' // force base64 to avoid URL fetch path
-    })
+      size: '1024x1024',
+      n: 1
+      // NOTE: no `response_format` here — API may reject it
+    }),
   });
 
   const text = await resp.text();
   if (!resp.ok) {
     let msg = text;
-    try { const j = JSON.parse(text); msg = j.error?.message || text; } catch {}
+    try {
+      const j = JSON.parse(text);
+      msg = j?.error?.message || text;
+    } catch {}
     throw new Error(`OpenAI error (${resp.status}): ${msg}`);
   }
 
   const data = JSON.parse(text);
-  const b64 = data?.data?.[0]?.b64_json;
-  if (!b64) throw new Error('OpenAI response missing b64_json');
-  return Buffer.from(b64, 'base64');
+  const item = data?.data?.[0];
+  if (!item) throw new Error('OpenAI response missing data[0]');
+
+  if (item.b64_json) {
+    return Buffer.from(item.b64_json, 'base64');
+  }
+  if (item.url) {
+    const r = await fetch(item.url);
+    if (!r.ok) throw new Error(`Failed to fetch image URL (HTTP ${r.status})`);
+    const arr = await r.arrayBuffer();
+    return Buffer.from(arr);
+  }
+  throw new Error('OpenAI image had neither b64_json nor url');
 }
 
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
@@ -50,7 +64,7 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const finalW = px(widthIn + 2 * bleedIn, dpi);
   const finalH = px(heightIn + 2 * bleedIn, dpi);
 
-  // 1) Base image (REST path, not SDK)
+  // 1) Base image
   const basePng = await generateBasePngViaREST(prompt);
 
   // 2) Resize to exact trim, then add bleed canvas + 300 DPI
@@ -90,8 +104,8 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
     .withMetadata({ density: dpi })
     .toBuffer();
 
-  // 4) Upload to Vercel Blob
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  // 4) Upload to Vercel Blob (public)
+  const token = process.env.BLOB_READ_WRITE_TOKEN; // optional
   const baseOpts = { access: 'public' as const, contentType: 'image/png' };
   const putOpts = token ? { ...baseOpts, token } : baseOpts;
 
@@ -125,8 +139,4 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const out = await generateDTF(cleanPrompt, wIn, hIn);
     res.status(200).json(out); return;
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Failed to generate';
-    console.error('[DTF API ERROR]', err);
-    res.status(500).json({ error: message }); return;
-  }
-}
+    const message = err instanceo
