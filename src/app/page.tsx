@@ -112,7 +112,7 @@ export default function Home() {
 
       {proofUrl && (
         <div className="border rounded p-3">
-          <div className="text-sm mb-2">Proof</div>
+          <div className="text-white mb-2">Proof</div>
           <img src={proofUrl} alt="DTF proof" className="max-w-full border rounded" />
           {finalUrl && (
             <a
