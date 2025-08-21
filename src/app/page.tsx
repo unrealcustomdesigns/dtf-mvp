@@ -5,6 +5,11 @@ import { useState } from 'react';
 type Status = 'idle' | 'working' | 'done' | 'error';
 type Option = { proofUrl: string; finalUrl: string };
 
+// API response shapes (typed — no `any`)
+type ApiMulti = { options: Option[]; error?: string };
+type ApiSingle = { proofUrl?: string; finalUrl?: string; error?: string };
+type ApiResponse = ApiMulti | ApiSingle | { error?: string };
+
 export default function Home() {
   const [prompt, setPrompt] = useState('');
   const [widthIn, setWidthIn] = useState<number>(11);
@@ -38,29 +43,28 @@ export default function Home() {
       });
 
       const text = await res.text();
-      let data: any = {};
+      let data: ApiResponse = {};
       try {
-        data = text ? JSON.parse(text) : {};
+        data = text ? (JSON.parse(text) as ApiResponse) : {};
       } catch {
         data = { error: text?.slice(0, 300) || 'Non-JSON response' };
       }
 
       if (!res.ok) {
-        alert(data.error || `HTTP ${res.status}: ${text?.slice(0, 200)}`);
+        const errMsg = 'error' in data && data.error ? data.error : `HTTP ${res.status}: ${text?.slice(0, 200)}`;
+        alert(errMsg);
         setStatus('error');
         return;
       }
 
-      // New multi-option response: { options: [{proofUrl, finalUrl}, ...] }
-      if (Array.isArray(data.options) && data.options.length > 0) {
-        setOptions(data.options as Option[]);
+      if ('options' in data && Array.isArray(data.options) && data.options.length > 0) {
+        setOptions(data.options);
         setSelected(0);
         setStatus('done');
         return;
       }
 
-      // Back-compat single response
-      if (data.proofUrl && data.finalUrl) {
+      if ('proofUrl' in data && 'finalUrl' in data && data.proofUrl && data.finalUrl) {
         setProofUrl(data.proofUrl);
         setFinalUrl(data.finalUrl);
         setStatus('done');
