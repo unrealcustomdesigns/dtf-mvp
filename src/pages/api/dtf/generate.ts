@@ -2,20 +2,10 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import sharp from 'sharp';
 import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
-type JimpImage = {
-  resize: (w: number, h: number) => JimpImage;
-  cover?: (w: number, h: number) => JimpImage;
-  getBufferAsync: (mime: string) => Promise<Buffer>;
-};
-
-type JimpModule = {
-  read: (data: Buffer) => Promise<JimpImage>;
-  MIME_PNG: string;
-};
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 
-// --------------- helpers ---------------
+// ---------- helpers ----------
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
 
 async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
@@ -36,20 +26,25 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
 
   const resp = await fetch('https://api.openai.com/v1/images/generations', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    // Keep payload minimal—some SDKs/infra choke on unexpected fields
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({
       model: 'gpt-image-1',
       prompt: `${prompt}\nTransparent background. Clean edges. No watermark. No text.`,
       size: '1024x1024',
-      n: 1
-    })
+      n: 1,
+    }),
   });
 
   const text = await resp.text();
   if (!resp.ok) {
     let msg = text;
-    try { msg = (JSON.parse(text)?.error?.message) || msg; } catch {}
+    try {
+      const j = JSON.parse(text);
+      msg = j?.error?.message || text;
+    } catch {}
     throw new Error(`OpenAI error (${resp.status}): ${msg}`);
   }
 
@@ -69,95 +64,117 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
   throw new Error('OpenAI image had neither b64_json nor url');
 }
 
-// --------------- core ---------------
+// ---------- core ----------
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
-  const dpi = 300, bleedIn = 0.125;
+  const dpi = 300;
+  const bleedIn = 0.125;
 
-  const trimW  = px(widthIn, dpi);
-  const trimH  = px(heightIn, dpi);
+  const trimW = px(widthIn, dpi);
+  const trimH = px(heightIn, dpi);
   const finalW = px(widthIn + 2 * bleedIn, dpi);
   const finalH = px(heightIn + 2 * bleedIn, dpi);
 
-  // 1) Generate
+  // 1) Generate base PNG from OpenAI
   const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
-if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
-  throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
-}
-// 2) Normalize + resize; use image-js fallback if Sharp errors
-// (no options objects passed to sharp; image-js is pure JS)
-type IImageJS = {
-  width: number; height: number;
-  resize(opts: { width?: number; height?: number }): IImageJS;
-  crop(opts: { x: number; y: number; width: number; height: number }): IImageJS;
-  toBuffer(opts: { format: 'png' }): Buffer;
-};
-type ImageJSPkg = { Image: { load(data: Buffer): Promise<IImageJS> } };
 
-const resizedTrim = await step('sharp_resize', async () => {
-  if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
-    throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
-  }
+  // 2) Normalize + resize; use image-js fallback if Sharp errors
+  type ImageJsImage = {
+    width: number; height: number;
+    resize(opts: { width?: number; height?: number }): ImageJsImage;
+    crop(opts: { x: number; y: number; width: number; height: number }): ImageJsImage;
+    toBuffer(opts: { format: 'png' }): Uint8Array | Buffer;
+  };
+  type ImageJsLoader = { load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImageJsImage> };
+  type ImageJsModuleShape = { Image?: ImageJsLoader } & { default?: ImageJsLoader | { Image?: ImageJsLoader } };
 
-  try {
-    // Normalize OpenAI output to a plain RGBA PNG first
-    const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
-    // Strict two-arg resize (no options object at all)
-    return await sharp(normalized).resize(trimW, trimH).toBuffer();
-  } catch (e) {
-    console.warn('[DTF] sharp resize failed, falling back to image-js:', e instanceof Error ? e.message : e);
+  const resizedTrim = await step('sharp_resize', async () => {
+    if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
+      throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
+    }
 
-    // --- Pure-JS fallback: cover-resize then center-crop with image-js ---
-    const IJ = (await import('image-js')) as unknown as ImageJSPkg;
-    const img = await IJ.Image.load(basePng);
+    try {
+      // Normalize model output to plain RGBA PNG first
+      const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
+      // Strict two-arg resize (no options object to avoid boolean-parsing edge cases)
+      return await sharp(normalized).resize(trimW, trimH).toBuffer();
+    } catch (e) {
+      console.warn('[DTF] sharp resize failed, falling back to image-js:', e instanceof Error ? e.message : e);
 
-    // Compute cover scale (like Sharp fit:'cover')
-    const scale = Math.max(trimW / img.width, trimH / img.height);
-    const newW = Math.max(1, Math.round(img.width * scale));
-    const newH = Math.max(1, Math.round(img.height * scale));
+      // Pure-JS fallback (no native bindings)
+      const mod = (await import('image-js')) as unknown as ImageJsModuleShape;
+      const ImageCls: ImageJsLoader | undefined =
+        mod.Image ??
+        (typeof (mod.default as any)?.load === 'function'
+          ? (mod.default as ImageJsLoader)
+          : (mod.default as any)?.Image);
 
-    const resized = img.resize({ width: newW, height: newH });
+      if (!ImageCls || typeof ImageCls.load !== 'function') {
+        throw new Error('image-js export shape not recognized (no Image.load)');
+      }
 
-    const x = Math.max(0, Math.floor((newW - trimW) / 2));
-    const y = Math.max(0, Math.floor((newH - trimH) / 2));
+      const img = await ImageCls.load(basePng);
 
-    const cropped = resized.crop({ x, y, width: trimW, height: trimH });
+      // Cover scale (like Sharp fit:'cover'): fill both dims, then crop center
+      const scale = Math.max(trimW / img.width, trimH / img.height);
+      const newW = Math.max(1, Math.round(img.width * scale));
+      const newH = Math.max(1, Math.round(img.height * scale));
 
-    // Return PNG buffer; Sharp will composite + set DPI afterward
-    return cropped.toBuffer({ format: 'png' });
-  }
-});
+      const resized = img.resize({ width: newW, height: newH });
+      const x = Math.max(0, Math.floor((newW - trimW) / 2));
+      const y = Math.max(0, Math.floor((newH - trimH) / 2));
+      const cropped = resized.crop({ x, y, width: trimW, height: trimH });
 
-  // 3) Add bleed + 300 DPI
+      const out = cropped.toBuffer({ format: 'png' });
+      return Buffer.isBuffer(out) ? out : Buffer.from(out);
+    }
+  });
+
+  // 3) Add bleed + set 300 DPI (final PNG)
   const finalPng = await step('sharp_bleed', () =>
-    sharp({ create: { width: finalW, height: finalH, channels: 4, background: { r:0,g:0,b:0,alpha:0 } } })
-      .composite([{ input: resizedTrim, left: Math.round((finalW - trimW)/2), top: Math.round((finalH - trimH)/2) }])
+    sharp({
+      create: { width: finalW, height: finalH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+    })
+      .composite([
+        {
+          input: resizedTrim,
+          left: Math.round((finalW - trimW) / 2),
+          top: Math.round((finalH - trimH) / 2),
+        },
+      ])
       .png({ compressionLevel: 9 })
       .withMetadata({ density: dpi })
       .toBuffer()
   );
 
-  // 4) Proof overlay
-  const bleedPx = px(bleedIn, dpi);
-  const safeInset = bleedPx + px(0.125, dpi);
-  const line = (w:number,h:number,r:number,g:number,b:number,a=0.7)=>
-    sharp({ create:{ width:w, height:h, channels:4, background:{ r,g,b,alpha:a } } }).png().toBuffer();
+  // 4) Proof overlay (trim=red, safe=green)
+  const proofPng = await step('sharp_proof', async () => {
+    const bleedPx = px(bleedIn, dpi);
+    const safeInset = bleedPx + px(0.125, dpi);
 
-  const proofPng = await step('sharp_proof', async () =>
-    sharp(finalPng).composite([
-      // Trim (red)
-      { input: await line(finalW, 2, 255,0,0), left: 0, top: bleedPx },
-      { input: await line(finalW, 2, 255,0,0), left: 0, top: finalH - bleedPx - 2 },
-      { input: await line(2, finalH, 255,0,0), left: bleedPx, top: 0 },
-      { input: await line(2, finalH, 255,0,0), left: finalW - bleedPx - 2, top: 0 },
-      // Safe (green)
-      { input: await line(finalW - safeInset*2, 2, 0,255,0), left: safeInset, top: safeInset },
-      { input: await line(finalW - safeInset*2, 2, 0,255,0), left: safeInset, top: finalH - safeInset - 2 },
-      { input: await line(2, finalH - safeInset*2, 0,255,0), left: safeInset, top: safeInset },
-      { input: await line(2, finalH - safeInset*2, 0,255,0), left: finalW - safeInset - 2, top: safeInset },
-    ]).png({ compressionLevel: 9 }).withMetadata({ density: dpi }).toBuffer()
-  );
+    const line = (w: number, h: number, r: number, g: number, b: number, a = 0.7) =>
+      sharp({ create: { width: w, height: h, channels: 4, background: { r, g, b, alpha: a } } })
+        .png()
+        .toBuffer();
 
-  // 5) Upload to Blob
+    return await sharp(finalPng)
+      .composite([
+        // Trim (red)
+        { input: await line(finalW, 2, 255, 0, 0), left: 0, top: bleedPx },
+        { input: await line(finalW, 2, 255, 0, 0), left: 0, top: finalH - bleedPx - 2 },
+        { input: await line(2, finalH, 255, 0, 0), left: bleedPx, top: 0 },
+        { input: await line(2, finalH, 255, 0, 0), left: finalW - bleedPx - 2, top: 0 },
+        // Safe (green)
+        { input: await line(finalW - safeInset * 2, 2, 0, 255, 0), left: safeInset, top: safeInset },
+        { input: await line(finalW - safeInset * 2, 2, 0, 255, 0), left: safeInset, top: finalH - safeInset - 2 },
+        { input: await line(2, finalH - safeInset * 2, 0, 255, 0), left: safeInset, top: safeInset },
+        { input: await line(2, finalH - safeInset * 2, 0, 255, 0), left: finalW - safeInset - 2, top: safeInset },
+      ])
+      .png({ compressionLevel: 9 })
+      .withMetadata({ density: dpi })
+      .toBuffer();
+  });
+
+  // 5) Upload to Vercel Blob (public)
   const token = process.env.BLOB_READ_WRITE_TOKEN; // optional
   const baseOpts = { access: 'public' as const, contentType: 'image/png' };
   const putOpts: Parameters<typeof put>[2] = token ? { ...baseOpts, token } : baseOpts;
@@ -173,19 +190,24 @@ const resizedTrim = await step('sharp_resize', async () => {
   return { finalUrl: finalBlob.url, proofUrl: proofBlob.url };
 }
 
-// --------------- handler ---------------
+// ---------- handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
-  // CORS
+  // CORS (Shopify-friendly)
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
 
   try {
-    const { prompt, widthIn, heightIn } = (req.body ?? {}) as { prompt?: string; widthIn?: number; heightIn?: number; };
+    const { prompt, widthIn, heightIn } = (req.body ?? {}) as {
+      prompt?: string; widthIn?: number; heightIn?: number;
+    };
+
     const cleanPrompt = (prompt ?? '').trim();
-    const wIn = Number(widthIn), hIn = Number(heightIn);
+    const wIn = Number(widthIn);
+    const hIn = Number(heightIn);
 
     if (!process.env.OPENAI_API_KEY) { res.status(500).json({ error: 'OPENAI_API_KEY is missing' }); return; }
     if (!cleanPrompt || !wIn || !hIn) { res.status(400).json({ error: 'prompt, widthIn, heightIn are required' }); return; }
