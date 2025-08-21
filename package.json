@@ -2,32 +2,34 @@
   "name": "dtf-mvp",
   "version": "0.1.0",
   "private": true,
-{
+  "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",            
+    "build": "next build",
     "start": "next start",
-    "postinstall": "npm rebuild sharp --include=optional || true"  
-  }
-}
-,
+    "lint": "next lint",
+    "postinstall": "npm rebuild sharp --include=optional || true"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "@vercel/blob": "^1.1.1",
+    "@vercel/blob": "^0.24.0",
     "next": "15.5.0",
-    "openai": "^5.13.1",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "sharp": "^0.33.5"
+    "openai": "^4.60.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "sharp": "^0.33.4"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3",
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
+    "@eslint/eslintrc": "^3.1.0",
+    "@tailwindcss/postcss": "^4.0.0",
+    "@types/node": "^20.14.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.9.0",
     "eslint-config-next": "15.5.0",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "tailwindcss": "^3.4.9",
+    "typescript": "^5.5.4"
   }
 }
