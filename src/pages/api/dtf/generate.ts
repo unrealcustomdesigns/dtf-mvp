@@ -58,10 +58,10 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
   throw new Error('OpenAI image had neither b64_json nor url');
 }
 
-// ---------- PNGJS fallback (pure JS) ----------
+// ---------- PNGJS fallback (pure JS), bilinear + center-crop ----------
 async function resizeCoverWithPngjs(pngBuf: Buffer, targetW: number, targetH: number): Promise<Buffer> {
   const { PNG } = await import('pngjs');
-  const src = PNG.sync.read(pngBuf); // {width,height,data: RGBA}
+  const src = PNG.sync.read(pngBuf); // { width, height, data: RGBA Uint8Array }
 
   const scale = Math.max(targetW / src.width, targetH / src.height);
   const scaledW = Math.max(1, Math.round(src.width * scale));
@@ -109,37 +109,9 @@ async function resizeCoverWithPngjs(pngBuf: Buffer, targetW: number, targetH: nu
   return PNG.sync.write(out);
 }
 
-  // nearest-neighbor
-  for (let y = 0; y < scaledH; y++) {
-    const sy = Math.min(src.height - 1, Math.floor(y / scale));
-    for (let x = 0; x < scaledW; x++) {
-      const sx = Math.min(src.width - 1, Math.floor(x / scale));
-      const si = (sy * src.width + sx) * 4;
-      const di = (y * scaledW + x) * 4;
-      dData[di]     = sData[si];
-      dData[di + 1] = sData[si + 1];
-      dData[di + 2] = sData[si + 2];
-      dData[di + 3] = sData[si + 3];
-    }
-  }
-
-  // center-crop
-  const cropX = Math.max(0, Math.floor((scaledW - targetW) / 2));
-  const cropY = Math.max(0, Math.floor((scaledH - targetH) / 2));
-  const cropped = new PNG({ width: targetW, height: targetH });
-
-  for (let y = 0; y < targetH; y++) {
-    const srcRowStart = ((y + cropY) * scaledW + cropX) * 4;
-    const dstRowStart = y * targetW * 4;
-    scaled.data.copy(cropped.data, dstRowStart, srcRowStart, srcRowStart + targetW * 4);
-  }
-
-  return PNG.sync.write(cropped);
-}
-
-// ---------- core (NO BLEED) ----------
+// ---------- core (NO BLEED, no DPI stamp) ----------
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
-  const dpi = 300;
+  const dpi = 300; // informational only (no metadata stamp)
 
   const trimW = px(widthIn, dpi);
   const trimH = px(heightIn, dpi);
@@ -162,16 +134,15 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
     }
   });
 
-// 3) Finalize (no DPI stamping to avoid Sharp quirk)
-const finalPng = await step('finalize', async () => {
-  // resizedTrim is already an exact-trim PNG Buffer
-  if (!Buffer.isBuffer(resizedTrim) || resizedTrim.length === 0) {
-    throw new Error('resizedTrim_not_buffer');
-  }
-  return resizedTrim;
-});
+  // 3) Finalize (no DPI stamping to avoid Sharp quirk)
+  const finalPng = await step('finalize', async () => {
+    if (!Buffer.isBuffer(resizedTrim) || resizedTrim.length === 0) {
+      throw new Error('resizedTrim_not_buffer');
+    }
+    return resizedTrim;
+  });
 
-  // 4) Proof = Final (no bleed/safe lines)
+  // 4) Proof = Final (no overlays)
   const proofPng = await step('proof_passthrough', async () => finalPng);
 
   // 5) Upload to Blob
