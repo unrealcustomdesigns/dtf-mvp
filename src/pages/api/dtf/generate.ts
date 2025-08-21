@@ -3,9 +3,8 @@ import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
-
-// add transparent margin equal to this % of the shorter side
-const MARGIN_FRACTION = 0.12; // 12%
+const MARGIN_FRACTION = 0.12; // 12% margin around model output
+const VARIATIONS = 3;         // how many options to generate
 
 // ---------- helpers ----------
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
@@ -22,7 +21,8 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
+// Ask OpenAI for N base PNGs (b64 or URL)
+async function generateBasePngsViaREST(prompt: string, count = VARIATIONS): Promise<Buffer[]> {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error('OPENAI_API_KEY is missing');
 
@@ -36,33 +36,37 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
         `Transparent background. Centered subject. Full subject in frame. Extra space from edges. ` +
         `Clean edges. No watermark. No text.`,
       size: '1024x1024',
-      n: 1,
-    }),
+      n: count
+    })
   });
 
   const text = await resp.text();
   if (!resp.ok) {
     let msg = text;
-    try { msg = JSON.parse(text)?.error?.message || msg; } catch {}
+    try { msg = (JSON.parse(text)?.error?.message) || msg; } catch {}
     throw new Error(`OpenAI error (${resp.status}): ${msg}`);
   }
 
   const data = JSON.parse(text);
-  const item = data?.data?.[0];
-  if (!item) throw new Error('OpenAI response missing data[0]');
+  const items = Array.isArray(data?.data) ? data.data : [];
+  if (!items.length) throw new Error('OpenAI response missing data array');
 
-  if (item.b64_json) return Buffer.from(item.b64_json, 'base64');
-  if (item.url) {
-    const r = await fetch(item.url);
-    if (!r.ok) throw new Error(`Failed to fetch image URL (HTTP ${r.status})`);
-    const arr = await r.arrayBuffer();
-    return Buffer.from(arr);
+  const buffers: Buffer[] = [];
+  for (const item of items) {
+    if (item?.b64_json) {
+      buffers.push(Buffer.from(item.b64_json, 'base64'));
+    } else if (item?.url) {
+      const r = await fetch(item.url);
+      if (!r.ok) throw new Error(`OpenAI URL fetch ${r.status}`);
+      const arr = await r.arrayBuffer();
+      buffers.push(Buffer.from(arr));
+    }
   }
-  throw new Error('OpenAI image had neither b64_json nor url');
+  if (!buffers.length) throw new Error('OpenAI returned no usable image buffers');
+  return buffers;
 }
 
 // ---------- PNGJS utilities ----------
-// transparent margin pad around the model's output
 async function padTransparentPng(pngBuf: Buffer, marginFraction = MARGIN_FRACTION): Promise<Buffer> {
   const { PNG } = await import('pngjs');
   const src = PNG.sync.read(pngBuf); // { width, height, data: Uint8Array }
@@ -136,56 +140,44 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
   return PNG.sync.write(out);
 }
 
-// ---------- core (NO BLEED, no DPI stamp; with auto margin before resize) ----------
+// process one candidate end-to-end
+async function processOne(basePng: Buffer, trimW: number, trimH: number, idx: number) {
+  const padded = await step(`pad_margin_${idx}`, () => padTransparentPng(basePng, MARGIN_FRACTION));
+  const resized = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
+  // finalize (no DPI stamp)
+  if (!Buffer.isBuffer(resized) || resized.length === 0) throw new Error(`resized_empty_${idx}`);
+  return resized;
+}
+
+// ---------- core ----------
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const dpi = 300; // informational only
   const trimW = px(widthIn, dpi);
   const trimH = px(heightIn, dpi);
 
-  // 1) Base PNG
-  const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
+  const bases = await step('openai_generate', () => generateBasePngsViaREST(prompt, VARIATIONS));
+  const finals = await Promise.all(
+    bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1))
+  );
 
-  // 2) Pad transparent margin to prevent visual “cuts” at edges
-  const padded = await step('pad_margin', () => padTransparentPng(basePng, MARGIN_FRACTION));
-
-  // 3) Resize to exact trim using “contain” (no crop)
-  const resizedTrim = await step('resize_trim', async () => {
-    if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
-      throw new Error(`invalid_trim_dims: trimW=${trimW}, trimH=${trimH}`);
-    }
-    return await resizeContainWithPngjs(padded, trimW, trimH);
-  });
-
-  // 4) Finalize (no DPI stamping)
-  const finalPng = await step('finalize', async () => {
-    if (!Buffer.isBuffer(resizedTrim) || resizedTrim.length === 0) {
-      throw new Error('resizedTrim_not_buffer');
-    }
-    return resizedTrim;
-  });
-
-  // 5) Proof = Final
-  const proofPng = await step('proof_passthrough', async () => finalPng);
-
-  // 6) Upload to Blob
+  // Upload each to Blob
   const token = process.env.BLOB_READ_WRITE_TOKEN; // optional
   const baseOpts = { access: 'public' as const, contentType: 'image/png' };
   const putOpts: Parameters<typeof put>[2] = token ? { ...baseOpts, token } : baseOpts;
 
-  const id = crypto.randomUUID();
-  const [finalBlob, proofBlob] = await step('blob_put', () =>
-    Promise.all([
-      put(`dtf/${id}-final.png`, finalPng, putOpts),
-      put(`dtf/${id}-proof.png`, proofPng, putOpts),
-    ])
-  );
+  const uploaded = await step('blob_put', async () => {
+    const id = crypto.randomUUID();
+    const uploads = await Promise.all(
+      finals.map((buffer, i) => put(`dtf/${id}-opt${i + 1}.png`, buffer, putOpts))
+    );
+    return uploads.map(u => ({ proofUrl: u.url, finalUrl: u.url }));
+  });
 
-  return { finalUrl: finalBlob.url, proofUrl: proofBlob.url };
+  return { options: uploaded };
 }
 
 // ---------- handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
-  // CORS (Shopify-friendly)
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
