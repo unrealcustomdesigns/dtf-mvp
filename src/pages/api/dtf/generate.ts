@@ -22,7 +22,7 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const finalW = px(widthIn + 2 * bleedIn, dpi);
   const finalH = px(heightIn + 2 * bleedIn, dpi);
 
-  // 1) Generate base transparent PNG (OpenAI may return b64 or url)
+  // 1) Base image (OpenAI may return b64 or url)
   const gen = await openai.images.generate({
     model: 'gpt-image-1',
     prompt: `${prompt}\nStyle: clean edges, no watermark, no text.\nBackground: transparent.`,
@@ -44,7 +44,7 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
     throw new Error('Image generation had neither b64_json nor url');
   }
 
-  // 2) Resize to exact trim, then add bleed canvas + 300 DPI metadata
+  // 2) Resize to trim, add bleed, set 300 DPI
   const resizedTrim = await sharp(basePng)
     .resize({ width: trimW, height: trimH, fit: 'cover' })
     .png()
@@ -93,38 +93,32 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   return { finalUrl: finalBlob.url, proofUrl: proofBlob.url };
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  // CORS headers (lets you embed from Shopify)
+export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
+  // CORS (also fine for Shopify iframe)
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+  if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
 
   try {
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: 'OPENAI_API_KEY is missing' });
-    }
+    if (!process.env.OPENAI_API_KEY) { res.status(500).json({ error: 'OPENAI_API_KEY is missing' }); return; }
 
     const { prompt, widthIn, heightIn } = (req.body ?? {}) as {
-      prompt?: string;
-      widthIn?: number;
-      heightIn?: number;
+      prompt?: string; widthIn?: number; heightIn?: number;
     };
 
     const cleanPrompt = (prompt ?? '').trim();
     const wIn = Number(widthIn);
     const hIn = Number(heightIn);
-    if (!cleanPrompt || !wIn || !hIn) {
-      return res.status(400).json({ error: 'prompt, widthIn, heightIn are required' });
-    }
+    if (!cleanPrompt || !wIn || !hIn) { res.status(400).json({ error: 'prompt, widthIn, heightIn are required' }); return; }
 
     const out = await generateDTF(cleanPrompt, wIn, hIn);
-    return res.status(200).json(out);
+    res.status(200).json(out); return;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Failed to generate';
     console.error('[DTF API ERROR]', err);
-    return res.status(500).json({ error: message });
+    res.status(500).json({ error: message }); return;
   }
 }
