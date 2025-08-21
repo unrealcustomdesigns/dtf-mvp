@@ -83,29 +83,47 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
 if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
   throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
 }
-// 2) Normalize + resize; fall back to Jimp if Sharp errors
+// 2) Normalize + resize; use image-js fallback if Sharp errors
+// (no options objects passed to sharp; image-js is pure JS)
+type IImageJS = {
+  width: number; height: number;
+  resize(opts: { width?: number; height?: number }): IImageJS;
+  crop(opts: { x: number; y: number; width: number; height: number }): IImageJS;
+  toBuffer(opts: { format: 'png' }): Buffer;
+};
+type ImageJSPkg = { Image: { load(data: Buffer): Promise<IImageJS> } };
+
 const resizedTrim = await step('sharp_resize', async () => {
   if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
     throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
   }
 
   try {
-    // Normalize to plain RGBA PNG first
+    // Normalize OpenAI output to a plain RGBA PNG first
     const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
-
-    // Strict two-arg resize (no options object)
+    // Strict two-arg resize (no options object at all)
     return await sharp(normalized).resize(trimW, trimH).toBuffer();
-  } catch {
-    console.warn('[DTF] sharp resize failed, falling back to Jimp');
+  } catch (e) {
+    console.warn('[DTF] sharp resize failed, falling back to image-js:', e instanceof Error ? e.message : e);
 
-    // Dynamic import with types; no `any`
-    const J = (await import('jimp')) as unknown as JimpModule;
-    const img = await J.read(basePng);
+    // --- Pure-JS fallback: cover-resize then center-crop with image-js ---
+    const IJ = (await import('image-js')) as unknown as ImageJSPkg;
+    const img = await IJ.Image.load(basePng);
 
-    if (img.cover) img.cover(trimW, trimH); // like Sharp fit:'cover'
-    else img.resize(trimW, trimH);           // basic fallback
+    // Compute cover scale (like Sharp fit:'cover')
+    const scale = Math.max(trimW / img.width, trimH / img.height);
+    const newW = Math.max(1, Math.round(img.width * scale));
+    const newH = Math.max(1, Math.round(img.height * scale));
 
-    return await img.getBufferAsync(J.MIME_PNG);
+    const resized = img.resize({ width: newW, height: newH });
+
+    const x = Math.max(0, Math.floor((newW - trimW) / 2));
+    const y = Math.max(0, Math.floor((newH - trimH) / 2));
+
+    const cropped = resized.crop({ x, y, width: trimW, height: trimH });
+
+    // Return PNG buffer; Sharp will composite + set DPI afterward
+    return cropped.toBuffer({ format: 'png' });
   }
 });
 
