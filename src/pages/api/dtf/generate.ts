@@ -135,60 +135,73 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
     return await resizeCoverWithPngjs(basePng, trimW, trimH);
   });
 
-// 3) Add bleed + set 300 DPI (final PNG)
-const finalPng = await step('sharp_bleed', async () => {
-  // Guard: dimensions must be finite positive ints
-  const W = Number.isFinite(finalW) ? Math.max(1, Math.floor(finalW)) : 0;
-  const H = Number.isFinite(finalH) ? Math.max(1, Math.floor(finalH)) : 0;
-  const tW = Number.isFinite(trimW)  ? Math.max(1, Math.floor(trimW))  : 0;
-  const tH = Number.isFinite(trimH)  ? Math.max(1, Math.floor(trimH))  : 0;
-  if (!W || !H || !tW || !tH) throw new Error(`invalid_canvas_or_trim: W=${W},H=${H},tW=${tW},tH=${tH}`);
+// 3) Add bleed + set 300 DPI (final PNG) — use extend instead of create+composite
+const { out: finalPng, width: finalWUsed, height: finalHUsed, bleedPx } =
+  await step('sharp_bleed', async () => {
+    // enforce integers and sane values
+    const tW = Math.max(1, Math.floor(trimW));
+    const tH = Math.max(1, Math.floor(trimH));
+    const bPx = Math.max(0, Math.floor(bleedIn * dpi));
 
-  // Guard: buffer must exist
-  if (!Buffer.isBuffer(resizedTrim) || resizedTrim.length === 0) {
-    throw new Error('resizedTrim_not_buffer');
-  }
+    if (!Buffer.isBuffer(resizedTrim) || resizedTrim.length === 0) {
+      throw new Error('resizedTrim_not_buffer');
+    }
 
-  // Integer pixel offsets
-  const left = Math.max(0, Math.floor((W - tW) / 2));
-  const top  = Math.max(0, Math.floor((H - tH) / 2));
+    // extend adds transparent bleed uniformly on every side
+    const out = await sharp(resizedTrim)
+      .ensureAlpha()
+      .extend({
+        top: bPx,
+        bottom: bPx,
+        left: bPx,
+        right: bPx,
+        background: { r: 0, g: 0, b: 0, alpha: 0 }
+      })
+      .png({ compressionLevel: 9 })
+      .withMetadata({ density: Number(dpi) })
+      .toBuffer();
 
-  return await sharp({
-    create: { width: W, height: H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } }
-  })
-    .composite([{ input: resizedTrim, left, top }])
+    return { out, width: tW + 2 * bPx, height: tH + 2 * bPx, bleedPx: bPx };
+  });
+
+// 4) Proof overlay (trim=red, safe=green) — uses actual extended size
+const proofPng = await step('sharp_proof', async () => {
+  const safeInset = bleedPx + Math.max(1, Math.floor(0.125 * dpi));
+
+  const line = (w: number, h: number, r: number, g: number, b: number, a = 0.7) =>
+    sharp({
+      create: {
+        width: Math.max(1, Math.floor(w)),
+        height: Math.max(1, Math.floor(h)),
+        channels: 4,
+        background: { r, g, b, alpha: a }
+      }
+    })
+      .png()
+      .toBuffer();
+
+  return await sharp(finalPng)
+    .composite([
+      // Trim (red) exactly at bleed boundary
+      { input: await line(finalWUsed, 2, 255, 0, 0), left: 0, top: bleedPx },
+      { input: await line(finalWUsed, 2, 255, 0, 0), left: 0, top: finalHUsed - bleedPx - 2 },
+      { input: await line(2, finalHUsed, 255, 0, 0), left: bleedPx, top: 0 },
+      { input: await line(2, finalHUsed, 255, 0, 0), left: finalWUsed - bleedPx - 2, top: 0 },
+
+      // Safe (green)
+      { input: await line(finalWUsed - safeInset * 2, 2, 0, 255, 0), left: safeInset, top: safeInset },
+      { input: await line(finalWUsed - safeInset * 2, 2, 0, 255, 0), left: safeInset, top: finalHUsed - safeInset - 2 },
+      { input: await line(2, finalHUsed - safeInset * 2, 0, 255, 0), left: safeInset, top: safeInset },
+      {
+        input: await line(2, finalHUsed - safeInset * 2, 0, 255, 0),
+        left: finalWUsed - safeInset - 2,
+        top: safeInset
+      }
+    ])
     .png({ compressionLevel: 9 })
     .withMetadata({ density: Number(dpi) })
     .toBuffer();
 });
-
-  // 4) Proof overlay (trim=red, safe=green)
-  const proofPng = await step('sharp_proof', async () => {
-    const bleedPx = px(bleedIn, dpi);
-    const safeInset = bleedPx + px(0.125, dpi);
-
-    const line = (w: number, h: number, r: number, g: number, b: number, a = 0.7) =>
-      sharp({ create: { width: w, height: h, channels: 4, background: { r, g, b, alpha: a } } })
-        .png()
-        .toBuffer();
-
-    return await sharp(finalPng)
-      .composite([
-        // Trim (red)
-        { input: await line(finalW, 2, 255, 0, 0), left: 0, top: bleedPx },
-        { input: await line(finalW, 2, 255, 0, 0), left: 0, top: finalH - bleedPx - 2 },
-        { input: await line(2, finalH, 255, 0, 0), left: bleedPx, top: 0 },
-        { input: await line(2, finalH, 255, 0, 0), left: finalW - bleedPx - 2, top: 0 },
-        // Safe (green)
-        { input: await line(finalW - safeInset * 2, 2, 0, 255, 0), left: safeInset, top: safeInset },
-        { input: await line(finalW - safeInset * 2, 2, 0, 255, 0), left: safeInset, top: finalH - safeInset - 2 },
-        { input: await line(2, finalH - safeInset * 2, 0, 255, 0), left: safeInset, top: safeInset },
-        { input: await line(2, finalH - safeInset * 2, 0, 255, 0), left: finalW - safeInset - 2, top: safeInset }
-      ])
-      .png({ compressionLevel: 9 })
-      .withMetadata({ density: dpi })
-      .toBuffer();
-  });
 
   // 5) Upload to Vercel Blob (public)
   const token = process.env.BLOB_READ_WRITE_TOKEN; // optional
