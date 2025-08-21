@@ -3,8 +3,12 @@ import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
-const MARGIN_FRACTION = 0.12; // 12% margin around model output
-const VARIATIONS = 3;         // how many options to generate
+
+// how many variations to generate
+const VARIATIONS = 3;
+
+// add transparent margin equal to this % of the shorter side
+const MARGIN_FRACTION = 0.12; // 12%
 
 // ---------- helpers ----------
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
@@ -21,49 +25,54 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// Ask OpenAI for N base PNGs (b64 or URL)
-async function generateBasePngsViaREST(prompt: string, count = VARIATIONS): Promise<Buffer[]> {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error('OPENAI_API_KEY is missing');
+// ---------- image generation (Nebius: flux-dev) ----------
+async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]> {
+  // Nebius (OpenAI-compatible)
+  const host  = process.env.NEBIUS_BASE_URL || 'https://api.studio.nebius.ai';
+  const key   = process.env.NEBIUS_API_KEY;
+  const model = process.env.NEBIUS_IMAGE_MODEL || 'flux-dev';
+  if (!key) throw new Error('NEBIUS_API_KEY is missing');
 
-  const resp = await fetch('https://api.openai.com/v1/images/generations', {
+  const resp = await fetch(`${host}/v1/images/generations`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({
-      model: 'gpt-image-1',
+      model,
       prompt:
         `${prompt}\n` +
         `Transparent background. Centered subject. Full subject in frame. Extra space from edges. ` +
         `Clean edges. No watermark. No text.`,
       size: '1024x1024',
-      n: count
-    })
+      n: count,
+    }),
   });
 
   const text = await resp.text();
   if (!resp.ok) {
     let msg = text;
     try { msg = (JSON.parse(text)?.error?.message) || msg; } catch {}
-    throw new Error(`OpenAI error (${resp.status}): ${msg}`);
+    throw new Error(`Nebius error (${resp.status}): ${msg}`);
   }
 
   const data = JSON.parse(text);
   const items = Array.isArray(data?.data) ? data.data : [];
-  if (!items.length) throw new Error('OpenAI response missing data array');
+  if (!items.length) throw new Error('Nebius response missing data array');
 
-  const buffers: Buffer[] = [];
+  const out: Buffer[] = [];
   for (const item of items) {
     if (item?.b64_json) {
-      buffers.push(Buffer.from(item.b64_json, 'base64'));
+      out.push(Buffer.from(item.b64_json, 'base64'));
     } else if (item?.url) {
       const r = await fetch(item.url);
-      if (!r.ok) throw new Error(`OpenAI URL fetch ${r.status}`);
-      const arr = await r.arrayBuffer();
-      buffers.push(Buffer.from(arr));
+      if (!r.ok) throw new Error(`Nebius URL fetch ${r.status}`);
+      out.push(Buffer.from(await r.arrayBuffer()));
     }
   }
-  if (!buffers.length) throw new Error('OpenAI returned no usable image buffers');
-  return buffers;
+  if (!out.length) throw new Error('Nebius returned no usable image buffers');
+  return out;
 }
 
 // ---------- PNGJS utilities ----------
@@ -140,22 +149,20 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
   return PNG.sync.write(out);
 }
 
-// process one candidate end-to-end
-async function processOne(basePng: Buffer, trimW: number, trimH: number, idx: number) {
-  const padded = await step(`pad_margin_${idx}`, () => padTransparentPng(basePng, MARGIN_FRACTION));
-  const resized = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
-  // finalize (no DPI stamp)
+async function processOne(basePng: Buffer, trimW: number, trimH: number, idx: number): Promise<Buffer> {
+  const padded  = await step(`pad_margin_${idx}`, () => padTransparentPng(basePng, MARGIN_FRACTION));
+  const resized = await step(`resize_trim_${idx}`,  () => resizeContainWithPngjs(padded, trimW, trimH));
   if (!Buffer.isBuffer(resized) || resized.length === 0) throw new Error(`resized_empty_${idx}`);
-  return resized;
+  return resized; // final PNG buffer (no DPI stamping)
 }
 
 // ---------- core ----------
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
-  const dpi = 300; // informational only
+  const dpi = 300; // informational only (we size by pixels)
   const trimW = px(widthIn, dpi);
   const trimH = px(heightIn, dpi);
 
-  const bases = await step('openai_generate', () => generateBasePngsViaREST(prompt, VARIATIONS));
+  const bases = await step('base_generate', () => generateBasePngs(prompt, VARIATIONS));
   const finals = await Promise.all(
     bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1))
   );
@@ -178,6 +185,7 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
 
 // ---------- handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
+  // CORS (Shopify-friendly)
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -194,7 +202,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const wIn = Number(widthIn);
     const hIn = Number(heightIn);
 
-    if (!process.env.OPENAI_API_KEY) { res.status(500).json({ error: 'OPENAI_API_KEY is missing' }); return; }
     if (!cleanPrompt || !wIn || !hIn) { res.status(400).json({ error: 'prompt, widthIn, heightIn are required' }); return; }
 
     const out = await generateDTF(cleanPrompt, wIn, hIn);
