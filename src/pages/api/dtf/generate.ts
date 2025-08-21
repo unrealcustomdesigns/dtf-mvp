@@ -60,16 +60,17 @@ async function generateBasePngViaREST(prompt: string): Promise<Buffer> {
 
 // ---------- PNGJS fallback (pure JS) ----------
 async function resizeCoverWithPngjs(pngBuf: Buffer, targetW: number, targetH: number): Promise<Buffer> {
-  const { PNG } = await import('pngjs'); // dynamic import to avoid TS/CJS quirks
-  const src = PNG.sync.read(pngBuf);     // decode PNG → {width,height,data:RGBA}
+  const { PNG } = await import('pngjs');
+  const src = PNG.sync.read(pngBuf);
 
   const scale = Math.max(targetW / src.width, targetH / src.height);
   const scaledW = Math.max(1, Math.round(src.width * scale));
   const scaledH = Math.max(1, Math.round(src.height * scale));
 
-  // Nearest-neighbor upscale (fast & sufficient for AI art edges)
   const scaled = new PNG({ width: scaledW, height: scaledH });
   const sData = src.data, dData = scaled.data;
+
+  // nearest-neighbor
   for (let y = 0; y < scaledH; y++) {
     const sy = Math.min(src.height - 1, Math.floor(y / scale));
     for (let x = 0; x < scaledW; x++) {
@@ -83,127 +84,57 @@ async function resizeCoverWithPngjs(pngBuf: Buffer, targetW: number, targetH: nu
     }
   }
 
-  // Center-crop to target
+  // center-crop
   const cropX = Math.max(0, Math.floor((scaledW - targetW) / 2));
   const cropY = Math.max(0, Math.floor((scaledH - targetH) / 2));
   const cropped = new PNG({ width: targetW, height: targetH });
+
   for (let y = 0; y < targetH; y++) {
-    for (let x = 0; x < targetW; x++) {
-      const sx = x + cropX, sy = y + cropY;
-      const si = (sy * scaledW + sx) * 4;
-      const di = (y * targetW + x) * 4;
-      const sd = scaled.data, dd = cropped.data;
-      dd[di]     = sd[si];
-      dd[di + 1] = sd[si + 1];
-      dd[di + 2] = sd[si + 2];
-      dd[di + 3] = sd[si + 3];
-    }
+    const srcRowStart = ((y + cropY) * scaledW + cropX) * 4;
+    const dstRowStart = y * targetW * 4;
+    scaled.data.copy(cropped.data, dstRowStart, srcRowStart, srcRowStart + targetW * 4);
   }
 
-  return PNG.sync.write(cropped); // encode back to PNG (Buffer)
+  return PNG.sync.write(cropped);
 }
 
-// ---------- core ----------
+// ---------- core (NO BLEED) ----------
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const dpi = 300;
-  const bleedIn = 0.125;
 
   const trimW = px(widthIn, dpi);
   const trimH = px(heightIn, dpi);
-  const finalW = px(widthIn + 2 * bleedIn, dpi);
-  const finalH = px(heightIn + 2 * bleedIn, dpi);
 
-  // 1) Base PNG from OpenAI
+  // 1) Base PNG
   const basePng = await step('openai_generate', () => generateBasePngViaREST(prompt));
 
-  // 2) Normalize + resize (Sharp → PNGJS fallback)
-  const resizedTrim = await step('sharp_resize', async () => {
+  // 2) Resize to exact trim (Sharp → PNGJS fallback)
+  const resizedTrim = await step('resize_trim', async () => {
     if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
-      throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
+      throw new Error(`invalid_trim_dims: trimW=${trimW}, trimH=${trimH}`);
     }
-
-    // Try Sharp first with zero options objects anywhere
     try {
       const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
       return await sharp(normalized).resize(trimW, trimH).toBuffer();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn('[DTF] sharp resize failed, falling back to PNGJS:', msg);
+      console.warn('[DTF] sharp resize failed, using PNGJS:', msg);
+      return await resizeCoverWithPngjs(basePng, trimW, trimH);
     }
-
-    // PNG-only fallback (no native code)
-    return await resizeCoverWithPngjs(basePng, trimW, trimH);
   });
 
-// 3) Add bleed + set 300 DPI (final PNG) — use extend instead of create+composite
-const { out: finalPng, width: finalWUsed, height: finalHUsed, bleedPx } =
-  await step('sharp_bleed', async () => {
-    // enforce integers and sane values
-    const tW = Math.max(1, Math.floor(trimW));
-    const tH = Math.max(1, Math.floor(trimH));
-    const bPx = Math.max(0, Math.floor(bleedIn * dpi));
-
-    if (!Buffer.isBuffer(resizedTrim) || resizedTrim.length === 0) {
-      throw new Error('resizedTrim_not_buffer');
-    }
-
-    // extend adds transparent bleed uniformly on every side
-    const out = await sharp(resizedTrim)
-      .ensureAlpha()
-      .extend({
-        top: bPx,
-        bottom: bPx,
-        left: bPx,
-        right: bPx,
-        background: { r: 0, g: 0, b: 0, alpha: 0 }
-      })
+  // 3) Stamp 300 DPI (no overlays)
+  const finalPng = await step('stamp_dpi', () =>
+    sharp(resizedTrim)
       .png({ compressionLevel: 9 })
       .withMetadata({ density: Number(dpi) })
-      .toBuffer();
+      .toBuffer()
+  );
 
-    return { out, width: tW + 2 * bPx, height: tH + 2 * bPx, bleedPx: bPx };
-  });
+  // 4) Proof = Final (no bleed/safe lines)
+  const proofPng = await step('proof_passthrough', async () => finalPng);
 
-// 4) Proof overlay (trim=red, safe=green) — uses actual extended size
-const proofPng = await step('sharp_proof', async () => {
-  const safeInset = bleedPx + Math.max(1, Math.floor(0.125 * dpi));
-
-  const line = (w: number, h: number, r: number, g: number, b: number, a = 0.7) =>
-    sharp({
-      create: {
-        width: Math.max(1, Math.floor(w)),
-        height: Math.max(1, Math.floor(h)),
-        channels: 4,
-        background: { r, g, b, alpha: a }
-      }
-    })
-      .png()
-      .toBuffer();
-
-  return await sharp(finalPng)
-    .composite([
-      // Trim (red) exactly at bleed boundary
-      { input: await line(finalWUsed, 2, 255, 0, 0), left: 0, top: bleedPx },
-      { input: await line(finalWUsed, 2, 255, 0, 0), left: 0, top: finalHUsed - bleedPx - 2 },
-      { input: await line(2, finalHUsed, 255, 0, 0), left: bleedPx, top: 0 },
-      { input: await line(2, finalHUsed, 255, 0, 0), left: finalWUsed - bleedPx - 2, top: 0 },
-
-      // Safe (green)
-      { input: await line(finalWUsed - safeInset * 2, 2, 0, 255, 0), left: safeInset, top: safeInset },
-      { input: await line(finalWUsed - safeInset * 2, 2, 0, 255, 0), left: safeInset, top: finalHUsed - safeInset - 2 },
-      { input: await line(2, finalHUsed - safeInset * 2, 0, 255, 0), left: safeInset, top: safeInset },
-      {
-        input: await line(2, finalHUsed - safeInset * 2, 0, 255, 0),
-        left: finalWUsed - safeInset - 2,
-        top: safeInset
-      }
-    ])
-    .png({ compressionLevel: 9 })
-    .withMetadata({ density: Number(dpi) })
-    .toBuffer();
-});
-
-  // 5) Upload to Vercel Blob (public)
+  // 5) Upload to Blob
   const token = process.env.BLOB_READ_WRITE_TOKEN; // optional
   const baseOpts = { access: 'public' as const, contentType: 'image/png' };
   const putOpts: Parameters<typeof put>[2] = token ? { ...baseOpts, token } : baseOpts;
