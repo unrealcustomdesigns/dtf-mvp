@@ -1,12 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Bundle native modules into the serverless function
-  serverExternalPackages: ['sharp', 'lightningcss'],
+  serverExternalPackages: ['sharp'],
   outputFileTracingIncludes: {
-    'src/pages/api/dtf/generate.ts': [
-      'node_modules/sharp/**/*',
-      'node_modules/lightningcss/**/*'
-    ]
+    'src/pages/api/dtf/generate.ts': ['node_modules/sharp/**/*']
   }
 };
 export default nextConfig;
