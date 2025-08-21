@@ -135,16 +135,32 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
     return await resizeCoverWithPngjs(basePng, trimW, trimH);
   });
 
-  // 3) Add bleed + set 300 DPI (final PNG)
-  const finalPng = await step('sharp_bleed', () =>
-    sharp({
-      create: { width: finalW, height: finalH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } }
-    })
-      .composite([{ input: resizedTrim, left: Math.round((finalW - trimW) / 2), top: Math.round((finalH - trimH) / 2) }])
-      .png({ compressionLevel: 9 })
-      .withMetadata({ density: dpi })
-      .toBuffer()
-  );
+// 3) Add bleed + set 300 DPI (final PNG)
+const finalPng = await step('sharp_bleed', async () => {
+  // Guard: dimensions must be finite positive ints
+  const W = Number.isFinite(finalW) ? Math.max(1, Math.floor(finalW)) : 0;
+  const H = Number.isFinite(finalH) ? Math.max(1, Math.floor(finalH)) : 0;
+  const tW = Number.isFinite(trimW)  ? Math.max(1, Math.floor(trimW))  : 0;
+  const tH = Number.isFinite(trimH)  ? Math.max(1, Math.floor(trimH))  : 0;
+  if (!W || !H || !tW || !tH) throw new Error(`invalid_canvas_or_trim: W=${W},H=${H},tW=${tW},tH=${tH}`);
+
+  // Guard: buffer must exist
+  if (!Buffer.isBuffer(resizedTrim) || resizedTrim.length === 0) {
+    throw new Error('resizedTrim_not_buffer');
+  }
+
+  // Integer pixel offsets
+  const left = Math.max(0, Math.floor((W - tW) / 2));
+  const top  = Math.max(0, Math.floor((H - tH) / 2));
+
+  return await sharp({
+    create: { width: W, height: H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } }
+  })
+    .composite([{ input: resizedTrim, left, top }])
+    .png({ compressionLevel: 9 })
+    .withMetadata({ density: Number(dpi) })
+    .toBuffer();
+});
 
   // 4) Proof overlay (trim=red, safe=green)
   const proofPng = await step('sharp_proof', async () => {
