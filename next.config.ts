@@ -3,16 +3,8 @@ const nextConfig = {
   experimental: {
     serverComponentsExternalPackages: ['sharp'],
     outputFileTracingIncludes: {
-      // Pages API route path (source path)
-      'src/pages/api/dtf/generate.ts': [
-        'node_modules/sharp/**/*',
-        'node_modules/@img/**/*'
-      ],
-      // (Safety) App Router variant in case you add it back later
-      'src/app/api/dtf/generate/route.ts': [
-        'node_modules/sharp/**/*',
-        'node_modules/@img/**/*'
-      ]
+      'src/pages/api/dtf/generate.ts': ['node_modules/sharp/**/*'],
+      'src/app/api/dtf/generate/route.ts': ['node_modules/sharp/**/*'] // harmless if the file doesn't exist
     }
   }
 };
