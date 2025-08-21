@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "postinstall": "npm rebuild sharp --include=optional || true"
+    "postinstall": "npm rebuild sharp --include=optional || true && npm rebuild lightningcss --include=optional || true"
+
   },
   "engines": {
     "node": "20.x"
