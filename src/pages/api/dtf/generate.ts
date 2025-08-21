@@ -73,22 +73,19 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
 if (!Number.isFinite(trimW) || !Number.isFinite(trimH) || trimW <= 0 || trimH <= 0) {
   throw new Error(`invalid_dimensions: trimW=${trimW}, trimH=${trimH}`);
 }
+import Jimp from 'jimp';
 
-// 2) Normalize, then resize to trim (NO options objects anywhere)
+// 2) Normalize + resize with Jimp fallback if Sharp balks
 const resizedTrim = await step('sharp_resize', async () => {
-  // Log dims to be 100% sure we have valid numbers
-  console.log(`[DTF] dims trimW=${trimW} trimH=${trimH}`);
-
-  // Normalize the model output to a plain PNG buffer first (no options on constructor)
-  const normalized = await sharp(basePng)
-    .ensureAlpha()       // force RGBA
-    .toFormat('png')     // strip palettes/animation/etc.
-    .toBuffer();
-
-  // Now resize using the two-arg signature ONLY (no options object)
-  return await sharp(normalized)
-    .resize(trimW, trimH)   // <<— strictly numbers, no 3rd-arg object
-    .toBuffer();            // we'll PNG-encode in the next step
+  try {
+    const normalized = await sharp(basePng).ensureAlpha().toFormat('png').toBuffer();
+    return await sharp(normalized).resize(trimW, trimH).toBuffer();
+  } catch (e) {
+    console.warn('[DTF] sharp resize failed, falling back to Jimp:', e instanceof Error ? e.message : e);
+    const img = await Jimp.read(basePng);
+    img.resize(trimW, trimH, Jimp.RESIZE_BILINEAR);
+    return await img.getBufferAsync(Jimp.MIME_PNG);
+  }
 });
 
 
