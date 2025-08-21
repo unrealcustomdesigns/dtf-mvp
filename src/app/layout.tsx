@@ -21,7 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       {/* make the whole app that soft gray */}
-      <body className="min-h-screen bg-[#F7F7F8] text-black">
+      <body className="min-h-screen bg-[#3a3b3d] text-black">
         {children}
       </body>
     </html>

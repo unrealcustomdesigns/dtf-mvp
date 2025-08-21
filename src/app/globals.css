@@ -5,14 +5,14 @@
 
 /* Theme variables */
 :root {
-  --background: #F7F7F8; /* ChatGPT-like light gray */
+  --background: #3a3b3d; /* ChatGPT-like dark gray */
   --foreground: #000000; /* black text */
 }
 
 /* Keep same light theme even in dark mode */
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #F7F7F8;
+    --background: #3a3b3d;
     --foreground: #000000;
   }
 }
