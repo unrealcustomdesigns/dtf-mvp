@@ -92,18 +92,25 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
     attempts++;
 
     const resp = await fetch(`${host}/v1/images/generations`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        prompt:
-          `${prompt}\n` +
-          `Transparent background. Centered subject. Full subject in frame. Extra space from edges. ` +
-          `Clean edges. No watermark. No text.`,
-        size: '1024x1024',
-        n: remaining
-      }),
-    });
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    model,
+    prompt:
+      `${prompt}\n` +
+      `Transparent background. Centered subject. Full subject in frame. Extra space from edges. ` +
+      `Clean edges. No watermark. No text.`,
+    size: '1024x1024',
+    n: remaining,
+    // Ask Nebius for base64 PNG if supported (OpenAI-compatible style)
+    response_format: 'b64_json',
+    image_format: 'png'
+  }),
+});
+
 
     const text = await resp.text();
     if (!resp.ok) {
@@ -124,10 +131,11 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
       if (it.b64_json && it.b64_json.length > 0) {
         accum.push(Buffer.from(it.b64_json, 'base64'));
       } else if (it.url && it.url.length > 0) {
-        const r = await fetch(it.url);
-        if (!r.ok) { console.warn(`[DTF] base_generate: url fetch ${r.status}; skipping`); continue; }
-        accum.push(Buffer.from(await r.arrayBuffer()));
-      }
+  const r = await fetch(it.url, { headers: { Accept: 'image/png,image/*;q=0.8' } });
+  if (!r.ok) { console.warn(`[DTF] base_generate: url fetch ${r.status}; skipping`); continue; }
+  accum.push(Buffer.from(await r.arrayBuffer()));
+}
+
       if (accum.length >= count) break;
     }
 
