@@ -32,6 +32,10 @@ export default function Home() {
   const [options, setOptions] = useState<Option[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
 
+  // NEW: user-selectable tools (masked names)
+  const [removeBg, setRemoveBg] = useState(false);
+  const [vectorize, setVectorize] = useState(true); // recommended default
+
   async function generate() {
     if (!prompt) return;
     setStatus('working');
@@ -44,7 +48,7 @@ export default function Home() {
       const res = await fetch('/api/dtf/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, removeBg, vectorize }),
       });
 
       const text = await res.text();
@@ -116,6 +120,26 @@ export default function Home() {
           <div className="mt-1">Pixels @300 DPI: {FIXED_PX} × {FIXED_PX}</div>
         </div>
 
+        {/* NEW: Tool toggles */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={removeBg}
+              onChange={(e) => setRemoveBg(e.target.checked)}
+            />
+            Background Removal
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={vectorize}
+              onChange={(e) => setVectorize(e.target.checked)}
+            />
+            Vectorization <span className="text-gray-500">(Recommended)</span>
+          </label>
+        </div>
+
         <button
           className="bg-black text-white rounded px-4 py-2"
           onClick={generate}
@@ -132,7 +156,7 @@ export default function Home() {
           For most T-shirt production the difference is minimal, and results should still look great.
         </div>
 
-        {/* Multi-option gallery */}
+        {/* Options */}
         {options.length > 0 && (
           <div className="border rounded p-3 space-y-3">
             <div className="text-sm font-medium mb-1">Pick one:</div>

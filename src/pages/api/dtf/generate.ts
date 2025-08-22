@@ -59,12 +59,6 @@ function pickGenSize(targetMaxSidePx: number): string {
   return `${s}x${s}`;
 }
 
-// force-download helper for mobile (Vercel Blob supports ?download=filename)
-function withDownload(u: string | undefined, filename: string): string | undefined {
-  if (!u) return undefined;
-  return `${u}${u.includes('?') ? '&' : '?'}download=${encodeURIComponent(filename)}`;
-}
-
 // ---------- normalize (pure JS via image-js) ----------
 type ImgJsLoaded = {
   width: number; height: number;
@@ -228,13 +222,12 @@ async function vectorizeWithVectorizer(png: Buffer): Promise<VectorizeResult> {
   throw new Error(`Vectorizer ${resp.status}: ${msg}`);
 }
 
-// IMPORTANT: Vectorizer Download requires image.token (not token)
 async function vectorizerDownload(token: string, format: 'svg'|'png'|'pdf'|'dxf'): Promise<Buffer> {
   const auth = 'Basic ' + Buffer.from(`${VECTORIZER_ID}:${VECTORIZER_SECRET}`).toString('base64');
 
-  // Preferred: POST multipart
+  // Preferred: POST multipart with image.token
   const form = new FormData();
-  form.append('image.token', token);     // <- required param
+  form.append('image.token', token);
   form.append('format', format);
 
   let resp = await fetch('https://vectorizer.ai/api/v1/download', {
@@ -244,7 +237,7 @@ async function vectorizerDownload(token: string, format: 'svg'|'png'|'pdf'|'dxf'
   });
   if (resp.ok) return Buffer.from(await resp.arrayBuffer());
 
-  // Fallback: GET with query
+  // Fallback: GET with image.token
   const url =
     `https://vectorizer.ai/api/v1/download?image.token=${encodeURIComponent(token)}&format=${encodeURIComponent(format)}`;
   resp = await fetch(url, { headers: { Authorization: auth } });
@@ -286,7 +279,6 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
   const scaled = new PNG({ width: scaledW, height: scaledH });
   const sData = src.data, dData = scaled.data;
 
-  // bilinear sample
   for (let y = 0; y < scaledH; y++) {
     const gy = (y + 0.5) / scale - 0.5;
     const y0 = Math.max(0, Math.floor(gy));
@@ -326,12 +318,12 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
   return PNG.sync.write(out);
 }
 
-// ---------- per-option pipeline ----------
+// ---------- per-option pipeline (honoring toggles) ----------
 type OptionOut = {
-  proofUrl: string;          // display (no attachment)
-  finalUrl: string;          // download URL with ?download=filename  ✅ mobile-friendly
-  svgUrl?: string;           // download URL with ?download=filename  ✅
-  vectorPngUrl?: string;     // download URL with ?download=filename  ✅
+  proofUrl: string;
+  finalUrl: string;      // plain Blob URL; UI proxies via /api/download
+  svgUrl?: string;
+  vectorPngUrl?: string;
 };
 
 async function processOne(
@@ -339,24 +331,28 @@ async function processOne(
   trimW: number,
   trimH: number,
   idx: number,
-  prompt: string
+  prompt: string,
+  doRemoveBg: boolean,
+  doVectorize: boolean
 ): Promise<OptionOut> {
   // 0) Normalize
   let { png: current } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
 
-  // 1) If still not PNG, pre-remove.bg to force PNG; if that fails, upload as-is and return
+  // 1) If still not PNG and user enabled Background Removal, try remove.bg to force PNG.
+  //    If disabled, we may have to skip pad/resize (rare edge case).
   if (!isPng(current)) {
-    try {
-      current = await step(`removebg_pre_${idx}`, () => removeBackground(current));
-    } catch (e) {
-      console.warn(`[DTF] remove.bg (pre) failed opt ${idx}:`, e instanceof Error ? e.message : e);
+    if (doRemoveBg) {
+      try {
+        current = await step(`removebg_pre_${idx}`, () => removeBackground(current));
+      } catch (e) {
+        console.warn(`[DTF] remove.bg (pre) failed opt ${idx}:`, e instanceof Error ? e.message : e);
+      }
+    }
+    if (!isPng(current)) {
+      // Can't safely pad/resize; upload as-is (display + download)
       const idEarly = crypto.randomUUID();
       const earlyBlob = await put(`dtf/${idEarly}-opt${idx}.png`, current, { access: 'public', contentType: 'image/png' });
-      // finalUrl uses download param for mobile friendliness
-      return {
-        proofUrl: earlyBlob.url,
-        finalUrl: withDownload(earlyBlob.url, `dtf-opt${idx}.png`)!,
-      };
+      return { proofUrl: earlyBlob.url, finalUrl: earlyBlob.url };
     }
   }
 
@@ -364,47 +360,49 @@ async function processOne(
   const padded = await step(`pad_margin_${idx}`, () => padTransparentPng(current, MARGIN_FRACTION));
   const sized  = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
 
-  // 3) remove.bg after sizing (skip safely on failure)
+  // 3) Background Removal after sizing (only if toggled on)
   let bgOut = sized;
-  try {
-    bgOut = await step(`removebg_${idx}`, () => removeBackground(sized));
-  } catch (e) {
-    console.warn(`[DTF] remove.bg failed opt ${idx}:`, e instanceof Error ? e.message : e);
+  if (doRemoveBg) {
+    try {
+      bgOut = await step(`removebg_${idx}`, () => removeBackground(sized));
+    } catch (e) {
+      console.warn(`[DTF] remove.bg failed opt ${idx}:`, e instanceof Error ? e.message : e);
+    }
   }
 
-  // 4) Vectorizer (SVG + extra PNG via token)
-  let svgDL: string | undefined;
-  let vectorPngDL: string | undefined;
-  try {
-    const { svg, token } = await step(`vectorize_${idx}`, () => vectorizeWithVectorizer(bgOut));
-    if (svg) {
-      const idv = crypto.randomUUID();
-      const svgBlob = await put(`dtf/${idv}-opt${idx}.svg`, svg, { access: 'public', contentType: 'image/svg+xml' });
-      svgDL = withDownload(svgBlob.url, `dtf-opt${idx}.svg`);
-    }
-    if (token) {
-      try {
-        const vpng = await step(`vectorize_download_${idx}`, () => vectorizerDownload(token, 'png'));
-        const idp = crypto.randomUUID();
-        const vpngBlob = await put(`dtf/${idp}-opt${idx}-vector.png`, vpng, {
-          access: 'public', contentType: 'image/png'
-        });
-        vectorPngDL = withDownload(vpngBlob.url, `dtf-opt${idx}-vector.png`);
-      } catch (e) {
-        console.warn(`[DTF] vectorizer download PNG failed opt ${idx}:`, e instanceof Error ? e.message : e);
+  // 4) Vectorization (only if toggled on)
+  let svgUrl: string | undefined;
+  let vectorPngUrl: string | undefined;
+  if (doVectorize) {
+    try {
+      const { svg, token } = await step(`vectorize_${idx}`, () => vectorizeWithVectorizer(bgOut));
+      if (svg) {
+        const idv = crypto.randomUUID();
+        const svgBlob = await put(`dtf/${idv}-opt${idx}.svg`, svg, { access: 'public', contentType: 'image/svg+xml' });
+        svgUrl = svgBlob.url;
       }
+      if (token) {
+        try {
+          const vpng = await step(`vectorize_download_${idx}`, () => vectorizerDownload(token, 'png'));
+          const idp = crypto.randomUUID();
+          const vpngBlob = await put(`dtf/${idp}-opt${idx}-vector.png`, vpng, {
+            access: 'public', contentType: 'image/png'
+          });
+          vectorPngUrl = vpngBlob.url;
+        } catch (e) {
+          console.warn(`[DTF] vectorizer download PNG failed opt ${idx}:`, e instanceof Error ? e.message : e);
+        }
+      }
+    } catch (e) {
+      console.warn(`[DTF] vectorizer failed opt ${idx}:`, e instanceof Error ? e.message : e);
     }
-  } catch (e) {
-    console.warn(`[DTF] vectorizer failed opt ${idx}:`, e instanceof Error ? e.message : e);
   }
 
-  // 5) Upload final print PNG (display + download URLs)
+  // 5) Upload final print PNG
   const id = crypto.randomUUID();
-  const printBlob = await step(`blob_put_${idx}`, () =>
-    put(`dtf/${id}-opt${idx}.png`, bgOut, { access: 'public', contentType: 'image/png' })
-  );
+  const printBlob = await put(`dtf/${id}-opt${idx}.png`, bgOut, { access: 'public', contentType: 'image/png' });
 
-  // 6) Publish to gallery (if enabled)
+  // 6) Publish to gallery (plain URLs)
   try {
     if (GALLERY_PUBLISH) {
       const status: 'approved' | 'pending' = GALLERY_REQUIRE_APPROVAL ? 'pending' : 'approved';
@@ -414,8 +412,8 @@ async function processOne(
         prompt,
         proofUrl: printBlob.url,
         finalUrl: printBlob.url,
-        svgUrl: svgDL,
-        vectorPngUrl: vectorPngDL,
+        svgUrl,
+        vectorPngUrl,
         status
       });
     }
@@ -423,16 +421,11 @@ async function processOne(
     console.warn('[DTF] gallery publish failed:', e instanceof Error ? e.message : e);
   }
 
-  return {
-    proofUrl: printBlob.url,                              // display in <img>
-    finalUrl: withDownload(printBlob.url, `dtf-opt${idx}.png`)!, // link for downloading  ✅
-    svgUrl: svgDL,                                       // download
-    vectorPngUrl: vectorPngDL,                           // download
-  };
+  return { proofUrl: printBlob.url, finalUrl: printBlob.url, svgUrl, vectorPngUrl };
 }
 
 // ---------- core ----------
-async function generateDTF(prompt: string) {
+async function generateDTF(prompt: string, doRemoveBg: boolean, doVectorize: boolean) {
   const dpi = 300;
   const widthIn = 11;
   const heightIn = 11;
@@ -440,7 +433,9 @@ async function generateDTF(prompt: string) {
   const trimH = px(heightIn, dpi); // 3300
 
   const bases  = await step('base_generate', () => generateBasePngs(prompt, VARIATIONS, trimW, trimH));
-  const options = await Promise.all(bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1, prompt)));
+  const options = await Promise.all(
+    bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1, prompt, doRemoveBg, doVectorize))
+  );
   return { options };
 }
 
@@ -503,15 +498,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
-    const { prompt } = (req.body ?? {}) as { prompt?: string };
+    const { prompt, removeBg, vectorize } = (req.body ?? {}) as {
+      prompt?: string; removeBg?: boolean; vectorize?: boolean;
+    };
     const cleanPrompt = (prompt ?? '').trim();
-
     if (!cleanPrompt) {
       res.status(400).json({ error: 'prompt is required' });
       return;
     }
 
-    const out = await generateDTF(cleanPrompt);
+    const out = await generateDTF(cleanPrompt, !!removeBg, !!vectorize);
     res.status(200).json(out);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Failed to generate';
