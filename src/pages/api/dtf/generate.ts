@@ -59,6 +59,12 @@ function pickGenSize(targetMaxSidePx: number): string {
   return `${s}x${s}`;
 }
 
+// force-download helper for mobile (Vercel Blob supports ?download=filename)
+function withDownload(u: string | undefined, filename: string): string | undefined {
+  if (!u) return undefined;
+  return `${u}${u.includes('?') ? '&' : '?'}download=${encodeURIComponent(filename)}`;
+}
+
 // ---------- normalize (pure JS via image-js) ----------
 type ImgJsLoaded = {
   width: number; height: number;
@@ -96,9 +102,7 @@ async function generateBasePngs(
   const model = process.env.NEBIUS_IMAGE_MODEL || 'black-forest-labs/flux-dev';
   if (!key) throw new Error('NEBIUS_API_KEY is missing');
 
-  // use the user's prompt verbatim
   const prompt = userPrompt;
-
   const size = pickGenSize(Math.max(desiredTrimW, desiredTrimH));
   const accum: Buffer[] = [];
   let remaining = Math.max(1, Math.floor(count));
@@ -138,14 +142,12 @@ async function generateBasePngs(
       continue;
     }
 
-    // Prefer base64 PNGs
     const b64Buffers: Buffer[] = [];
     for (const it of items) if (it.b64_json) b64Buffers.push(Buffer.from(it.b64_json, 'base64'));
 
     if (b64Buffers.length) {
       accum.push(...b64Buffers);
     } else {
-      // Fallback to URLs; prefer server-side PNG if supported
       for (const it of items) {
         if (!it.url) continue;
         const r = await fetch(it.url, { headers: { Accept: 'image/png,image/*;q=0.8' } });
@@ -226,13 +228,14 @@ async function vectorizeWithVectorizer(png: Buffer): Promise<VectorizeResult> {
   throw new Error(`Vectorizer ${resp.status}: ${msg}`);
 }
 
+// IMPORTANT: Vectorizer Download requires image.token (not token)
 async function vectorizerDownload(token: string, format: 'svg'|'png'|'pdf'|'dxf'): Promise<Buffer> {
   const auth = 'Basic ' + Buffer.from(`${VECTORIZER_ID}:${VECTORIZER_SECRET}`).toString('base64');
 
-  // Recommended: POST with multipart form
+  // Preferred: POST multipart
   const form = new FormData();
-  form.append('image.token', token);        // <-- IMPORTANT: image.token
-  form.append('format', format);            // format is OK
+  form.append('image.token', token);     // <- required param
+  form.append('format', format);
 
   let resp = await fetch('https://vectorizer.ai/api/v1/download', {
     method: 'POST',
@@ -241,15 +244,15 @@ async function vectorizerDownload(token: string, format: 'svg'|'png'|'pdf'|'dxf'
   });
   if (resp.ok) return Buffer.from(await resp.arrayBuffer());
 
-  // Fallback: GET with query (also use image.token)
-  const url = `https://vectorizer.ai/api/v1/download?image.token=${encodeURIComponent(token)}&format=${encodeURIComponent(format)}`;
+  // Fallback: GET with query
+  const url =
+    `https://vectorizer.ai/api/v1/download?image.token=${encodeURIComponent(token)}&format=${encodeURIComponent(format)}`;
   resp = await fetch(url, { headers: { Authorization: auth } });
   if (resp.ok) return Buffer.from(await resp.arrayBuffer());
 
   const msg = await resp.text();
   throw new Error(`Vectorizer download ${resp.status}: ${msg}`);
 }
-
 
 // ---------- PNGJS helpers ----------
 async function padTransparentPng(pngBuf: Buffer, marginFraction = MARGIN_FRACTION): Promise<Buffer> {
@@ -283,6 +286,7 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
   const scaled = new PNG({ width: scaledW, height: scaledH });
   const sData = src.data, dData = scaled.data;
 
+  // bilinear sample
   for (let y = 0; y < scaledH; y++) {
     const gy = (y + 0.5) / scale - 0.5;
     const y0 = Math.max(0, Math.floor(gy));
@@ -324,10 +328,10 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
 
 // ---------- per-option pipeline ----------
 type OptionOut = {
-  proofUrl: string;
-  finalUrl: string;      // print PNG (after size + remove.bg)
-  svgUrl?: string;       // vectorizer SVG
-  vectorPngUrl?: string; // vectorizer PNG via token (if available)
+  proofUrl: string;          // display (no attachment)
+  finalUrl: string;          // download URL with ?download=filename  ✅ mobile-friendly
+  svgUrl?: string;           // download URL with ?download=filename  ✅
+  vectorPngUrl?: string;     // download URL with ?download=filename  ✅
 };
 
 async function processOne(
@@ -348,7 +352,11 @@ async function processOne(
       console.warn(`[DTF] remove.bg (pre) failed opt ${idx}:`, e instanceof Error ? e.message : e);
       const idEarly = crypto.randomUUID();
       const earlyBlob = await put(`dtf/${idEarly}-opt${idx}.png`, current, { access: 'public', contentType: 'image/png' });
-      return { proofUrl: earlyBlob.url, finalUrl: earlyBlob.url };
+      // finalUrl uses download param for mobile friendliness
+      return {
+        proofUrl: earlyBlob.url,
+        finalUrl: withDownload(earlyBlob.url, `dtf-opt${idx}.png`)!,
+      };
     }
   }
 
@@ -365,14 +373,14 @@ async function processOne(
   }
 
   // 4) Vectorizer (SVG + extra PNG via token)
-  let svgUrl: string | undefined;
-  let vectorPngUrl: string | undefined;
+  let svgDL: string | undefined;
+  let vectorPngDL: string | undefined;
   try {
     const { svg, token } = await step(`vectorize_${idx}`, () => vectorizeWithVectorizer(bgOut));
     if (svg) {
       const idv = crypto.randomUUID();
       const svgBlob = await put(`dtf/${idv}-opt${idx}.svg`, svg, { access: 'public', contentType: 'image/svg+xml' });
-      svgUrl = svgBlob.url;
+      svgDL = withDownload(svgBlob.url, `dtf-opt${idx}.svg`);
     }
     if (token) {
       try {
@@ -381,7 +389,7 @@ async function processOne(
         const vpngBlob = await put(`dtf/${idp}-opt${idx}-vector.png`, vpng, {
           access: 'public', contentType: 'image/png'
         });
-        vectorPngUrl = vpngBlob.url;
+        vectorPngDL = withDownload(vpngBlob.url, `dtf-opt${idx}-vector.png`);
       } catch (e) {
         console.warn(`[DTF] vectorizer download PNG failed opt ${idx}:`, e instanceof Error ? e.message : e);
       }
@@ -390,9 +398,11 @@ async function processOne(
     console.warn(`[DTF] vectorizer failed opt ${idx}:`, e instanceof Error ? e.message : e);
   }
 
-  // 5) Upload final print PNG
+  // 5) Upload final print PNG (display + download URLs)
   const id = crypto.randomUUID();
-  const printBlob = await put(`dtf/${id}-opt${idx}.png`, bgOut, { access: 'public', contentType: 'image/png' });
+  const printBlob = await step(`blob_put_${idx}`, () =>
+    put(`dtf/${id}-opt${idx}.png`, bgOut, { access: 'public', contentType: 'image/png' })
+  );
 
   // 6) Publish to gallery (if enabled)
   try {
@@ -404,8 +414,8 @@ async function processOne(
         prompt,
         proofUrl: printBlob.url,
         finalUrl: printBlob.url,
-        svgUrl,
-        vectorPngUrl,
+        svgUrl: svgDL,
+        vectorPngUrl: vectorPngDL,
         status
       });
     }
@@ -413,7 +423,12 @@ async function processOne(
     console.warn('[DTF] gallery publish failed:', e instanceof Error ? e.message : e);
   }
 
-  return { proofUrl: printBlob.url, finalUrl: printBlob.url, svgUrl, vectorPngUrl };
+  return {
+    proofUrl: printBlob.url,                              // display in <img>
+    finalUrl: withDownload(printBlob.url, `dtf-opt${idx}.png`)!, // link for downloading  ✅
+    svgUrl: svgDL,                                       // download
+    vectorPngUrl: vectorPngDL,                           // download
+  };
 }
 
 // ---------- core ----------
@@ -431,7 +446,6 @@ async function generateDTF(prompt: string) {
 
 // ----- RATE LIMIT (Upstash Redis) -----
 const RATE_LIMIT_PER_HOUR = Number(process.env.RATE_LIMIT_PER_HOUR || 15);
-
 const redis = process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
   ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN })
   : null;
@@ -440,7 +454,6 @@ async function rateLimit(req: NextApiRequest): Promise<{ ok: boolean; remaining:
   if (!redis) {
     return { ok: true, remaining: RATE_LIMIT_PER_HOUR, reset: Math.ceil(Date.now() / 1000) + 3600 };
   }
-
   const nowSec = Math.floor(Date.now() / 1000);
   const windowSec = 3600;
   const windowId = Math.floor(nowSec / windowSec);
