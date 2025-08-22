@@ -119,6 +119,13 @@ export default function Home() {
         >
           {status === 'working' ? 'Generating…' : 'Generate'}
         </button>
+{/* Disclaimer */}
+<div className="text-xs text-gray-700 bg-yellow-50 border border-yellow-200 rounded-md p-3 leading-relaxed">
+  <strong>Note:</strong> For best results, download the <strong>SVG</strong> and import it into the gang sheet builder.
+  SVGs scale to any size without losing quality. Our <strong>PNG</strong> output is model-limited to roughly
+  <strong> 8–9″</strong> on the long side; enlarging beyond that will soften edges slightly.
+  For most T-shirt production the difference is minimal, and results should still look great.
+</div>
 
         {/* Multi-option gallery */}
         {options.length > 0 && (
