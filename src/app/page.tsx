@@ -16,10 +16,6 @@ export default function Home() {
   const [heightIn, setHeightIn] = useState<number>(11);
   const [status, setStatus] = useState<Status>('idle');
 
-  // Feature toggles
-  const [removeBg, setRemoveBg] = useState(false);
-  const [vectorize, setVectorize] = useState(false);
-
   // Single-result (back-compat)
   const [proofUrl, setProofUrl] = useState<string>();
   const [finalUrl, setFinalUrl] = useState<string>();
@@ -47,8 +43,6 @@ export default function Home() {
           prompt,
           widthIn: Number(widthIn),
           heightIn: Number(heightIn),
-          removeBg,
-          vectorize,
         }),
       });
 
@@ -138,16 +132,6 @@ export default function Home() {
         </div>
 
         {/* Optional features */}
-        <div className="flex flex-wrap items-center gap-6">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={removeBg} onChange={e => setRemoveBg(e.target.checked)} />
-            Remove background (remove.bg)
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={vectorize} onChange={e => setVectorize(e.target.checked)} />
-            Vectorize to SVG (Vectorizer.AI)
-          </label>
-        </div>
 
         <div className="text-xs">
           <div><strong>DPI:</strong> 300 (pixels shown are trim size; no bleed)</div>
