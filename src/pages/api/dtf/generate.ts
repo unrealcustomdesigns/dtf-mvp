@@ -1,7 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
-import { Image } from 'image-js';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 const VARIATIONS = 3;
@@ -22,7 +21,7 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// Detect PNG by signature (keep ONLY one definition)
+// Detect PNG by signature
 function isPng(buf: Buffer): boolean {
   return (
     buf.length > 8 &&
@@ -31,21 +30,30 @@ function isPng(buf: Buffer): boolean {
   );
 }
 
-// Pure-JS normalize to PNG using image-js (typed, no 'any')
-type ImgJsLoaded = {
-  width: number; height: number;
-  toBuffer: (mime: 'image/png') => Uint8Array | Buffer;
-};
-type ImgJsCtor = typeof Image & {
-  load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImgJsLoaded>;
-};
+// ---------- Pure-JS normalize to PNG using image-decode + pngjs ----------
+type Decoded = { width: number; height: number; data: Uint8Array };
+type DecodeFn = (data: ArrayBuffer | Uint8Array | Buffer) => Promise<Decoded>;
+type DecodeModule =
+  | { default: DecodeFn }
+  | DecodeFn
+  | { default?: unknown };
 
 async function ensurePng(buf: Buffer): Promise<Buffer> {
   if (isPng(buf)) return buf;
-  const I = Image as unknown as ImgJsCtor; // assert the static 'load' method
-  const img = await I.load(buf);           // decode JPEG/WebP/etc. in pure JS
-  const out = img.toBuffer('image/png');   // Uint8Array | Buffer
-  return Buffer.isBuffer(out) ? out : Buffer.from(out);
+
+  const mod: DecodeModule = (await import('image-decode')) as unknown as DecodeModule;
+  let decodeFn: DecodeFn | undefined;
+  if (typeof mod === 'function') decodeFn = mod as DecodeFn;
+  else if (typeof (mod as { default?: unknown }).default === 'function') {
+    decodeFn = (mod as { default: unknown }).default as DecodeFn;
+  }
+  if (!decodeFn) throw new Error('image-decode import failed');
+
+  const { width, height, data } = await decodeFn(buf);
+  const { PNG } = await import('pngjs');
+  const png = new PNG({ width, height });
+  png.data.set(data);
+  return PNG.sync.write(png);
 }
 
 // ---------- Nebius image generation (OpenAI-compatible) ----------
@@ -103,14 +111,14 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
 // ---------- PNGJS helpers ----------
 async function padTransparentPng(pngBuf: Buffer, marginFraction = MARGIN_FRACTION): Promise<Buffer> {
   const { PNG } = await import('pngjs');
-  const src = PNG.sync.read(pngBuf); // { width, height, data: Uint8Array }
+  const src = PNG.sync.read(pngBuf); // { width, height, data }
 
   const base = Math.min(src.width, src.height);
   const pad = Math.max(1, Math.floor(base * Math.max(0, marginFraction)));
 
   const outW = src.width + 2 * pad;
   const outH = src.height + 2 * pad;
-  const out = new PNG({ width: outW, height: outH }); // zeroed => fully transparent
+  const out = new PNG({ width: outW, height: outH }); // transparent
 
   for (let y = 0; y < src.height; y++) {
     const srcStart = y * src.width * 4;
@@ -121,10 +129,10 @@ async function padTransparentPng(pngBuf: Buffer, marginFraction = MARGIN_FRACTIO
   return PNG.sync.write(out);
 }
 
-// contain scale (no crop) + center on transparent canvas
+// contain scale (no crop) + center on transparent canvas (bilinear)
 async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: number): Promise<Buffer> {
   const { PNG } = await import('pngjs');
-  const src = PNG.sync.read(pngBuf);
+  const src = PNG.sync.read(pngBuf); // { width, height, data }
 
   const scale = Math.min(targetW / src.width, targetH / src.height);
   const scaledW = Math.max(1, Math.round(src.width * scale));
@@ -184,7 +192,7 @@ async function processOne(baseBuf: Buffer, trimW: number, trimH: number, idx: nu
 
 // ---------- core ----------
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
-  const dpi = 300; // informational only (sizing via pixels)
+  const dpi = 300; // informational only
   const trimW = px(widthIn, dpi);
   const trimH = px(heightIn, dpi);
 
