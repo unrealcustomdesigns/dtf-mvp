@@ -3,6 +3,10 @@ import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
 import { Image } from 'image-js';
 import { Redis } from '@upstash/redis';
+import { addToGallery } from '@/lib/gallery';
+
+const GALLERY_PUBLISH = String(process.env.GALLERY_PUBLISH || 'false').toLowerCase() === 'true';
+const GALLERY_REQUIRE_APPROVAL = String(process.env.GALLERY_REQUIRE_APPROVAL || 'false').toLowerCase() === 'true';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 
@@ -92,10 +96,8 @@ async function generateBasePngs(
   const model = process.env.NEBIUS_IMAGE_MODEL || 'black-forest-labs/flux-dev';
   if (!key) throw new Error('NEBIUS_API_KEY is missing');
 
-  // silently prefix the prompt const prompt = `Vector style. ${userPrompt}`;
   // use the user's prompt verbatim
-const prompt = userPrompt;
-
+  const prompt = userPrompt;
 
   const size = pickGenSize(Math.max(desiredTrimW, desiredTrimH));
   const accum: Buffer[] = [];
@@ -227,25 +229,27 @@ async function vectorizeWithVectorizer(png: Buffer): Promise<VectorizeResult> {
 async function vectorizerDownload(token: string, format: 'svg'|'png'|'pdf'|'dxf'): Promise<Buffer> {
   const auth = 'Basic ' + Buffer.from(`${VECTORIZER_ID}:${VECTORIZER_SECRET}`).toString('base64');
 
-  // GET style
-  const url = `https://vectorizer.ai/api/v1/download?token=${encodeURIComponent(token)}&format=${encodeURIComponent(format)}`;
-  let resp = await fetch(url, { headers: { Authorization: auth } });
-  if (resp.ok) return Buffer.from(await resp.arrayBuffer());
-
-  // POST fallback
+  // Recommended: POST with multipart form
   const form = new FormData();
-  form.append('token', token);
-  form.append('format', format);
-  resp = await fetch('https://vectorizer.ai/api/v1/download', {
+  form.append('image.token', token);        // <-- IMPORTANT: image.token
+  form.append('format', format);            // format is OK
+
+  let resp = await fetch('https://vectorizer.ai/api/v1/download', {
     method: 'POST',
     headers: { Authorization: auth },
     body: form,
   });
   if (resp.ok) return Buffer.from(await resp.arrayBuffer());
 
+  // Fallback: GET with query (also use image.token)
+  const url = `https://vectorizer.ai/api/v1/download?image.token=${encodeURIComponent(token)}&format=${encodeURIComponent(format)}`;
+  resp = await fetch(url, { headers: { Authorization: auth } });
+  if (resp.ok) return Buffer.from(await resp.arrayBuffer());
+
   const msg = await resp.text();
   throw new Error(`Vectorizer download ${resp.status}: ${msg}`);
 }
+
 
 // ---------- PNGJS helpers ----------
 async function padTransparentPng(pngBuf: Buffer, marginFraction = MARGIN_FRACTION): Promise<Buffer> {
@@ -279,7 +283,6 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
   const scaled = new PNG({ width: scaledW, height: scaledH });
   const sData = src.data, dData = scaled.data;
 
-  // bilinear
   for (let y = 0; y < scaledH; y++) {
     const gy = (y + 0.5) / scale - 0.5;
     const y0 = Math.max(0, Math.floor(gy));
@@ -322,7 +325,7 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
 // ---------- per-option pipeline ----------
 type OptionOut = {
   proofUrl: string;
-  finalUrl: string;      // our print PNG (after size + remove.bg)
+  finalUrl: string;      // print PNG (after size + remove.bg)
   svgUrl?: string;       // vectorizer SVG
   vectorPngUrl?: string; // vectorizer PNG via token (if available)
 };
@@ -331,12 +334,13 @@ async function processOne(
   baseBuf: Buffer,
   trimW: number,
   trimH: number,
-  idx: number
+  idx: number,
+  prompt: string
 ): Promise<OptionOut> {
-  // 0) Normalize to PNG
+  // 0) Normalize
   let { png: current } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
 
-  // 1) If still not PNG, try remove.bg first to get a PNG; if that fails, just upload the bytes and return
+  // 1) If still not PNG, pre-remove.bg to force PNG; if that fails, upload as-is and return
   if (!isPng(current)) {
     try {
       current = await step(`removebg_pre_${idx}`, () => removeBackground(current));
@@ -352,7 +356,7 @@ async function processOne(
   const padded = await step(`pad_margin_${idx}`, () => padTransparentPng(current, MARGIN_FRACTION));
   const sized  = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
 
-  // 3) remove.bg after sizing (skip safely if not configured or fails)
+  // 3) remove.bg after sizing (skip safely on failure)
   let bgOut = sized;
   try {
     bgOut = await step(`removebg_${idx}`, () => removeBackground(sized));
@@ -360,7 +364,7 @@ async function processOne(
     console.warn(`[DTF] remove.bg failed opt ${idx}:`, e instanceof Error ? e.message : e);
   }
 
-  // 4) Vectorizer (SVG + extra PNG via token) — never break the job if it fails
+  // 4) Vectorizer (SVG + extra PNG via token)
   let svgUrl: string | undefined;
   let vectorPngUrl: string | undefined;
   try {
@@ -390,6 +394,25 @@ async function processOne(
   const id = crypto.randomUUID();
   const printBlob = await put(`dtf/${id}-opt${idx}.png`, bgOut, { access: 'public', contentType: 'image/png' });
 
+  // 6) Publish to gallery (if enabled)
+  try {
+    if (GALLERY_PUBLISH) {
+      const status: 'approved' | 'pending' = GALLERY_REQUIRE_APPROVAL ? 'pending' : 'approved';
+      await addToGallery({
+        id,
+        createdAt: Date.now(),
+        prompt,
+        proofUrl: printBlob.url,
+        finalUrl: printBlob.url,
+        svgUrl,
+        vectorPngUrl,
+        status
+      });
+    }
+  } catch (e) {
+    console.warn('[DTF] gallery publish failed:', e instanceof Error ? e.message : e);
+  }
+
   return { proofUrl: printBlob.url, finalUrl: printBlob.url, svgUrl, vectorPngUrl };
 }
 
@@ -402,9 +425,10 @@ async function generateDTF(prompt: string) {
   const trimH = px(heightIn, dpi); // 3300
 
   const bases  = await step('base_generate', () => generateBasePngs(prompt, VARIATIONS, trimW, trimH));
-  const options = await Promise.all(bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1)));
+  const options = await Promise.all(bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1, prompt)));
   return { options };
 }
+
 // ----- RATE LIMIT (Upstash Redis) -----
 const RATE_LIMIT_PER_HOUR = Number(process.env.RATE_LIMIT_PER_HOUR || 15);
 
@@ -412,10 +436,8 @@ const redis = process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_RE
   ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN })
   : null;
 
-/** Fixed-window limiter: increments a counter for this hour; returns {ok, remaining, reset} */
 async function rateLimit(req: NextApiRequest): Promise<{ ok: boolean; remaining: number; reset: number }> {
   if (!redis) {
-    // no redis configured => allow everything
     return { ok: true, remaining: RATE_LIMIT_PER_HOUR, reset: Math.ceil(Date.now() / 1000) + 3600 };
   }
 
@@ -423,7 +445,6 @@ async function rateLimit(req: NextApiRequest): Promise<{ ok: boolean; remaining:
   const windowSec = 3600;
   const windowId = Math.floor(nowSec / windowSec);
 
-  // fingerprint per IP+UA (hash to avoid storing raw IP)
   const ip = (req.headers['x-forwarded-for']?.toString().split(',')[0] || req.socket.remoteAddress || 'unknown');
   const ua = req.headers['user-agent'] || '';
   const fp = crypto.createHash('sha256').update(`${ip}|${ua}`).digest('hex');
@@ -435,7 +456,7 @@ async function rateLimit(req: NextApiRequest): Promise<{ ok: boolean; remaining:
   }
 
   const remaining = Math.max(0, RATE_LIMIT_PER_HOUR - count);
-  const reset = (windowId + 1) * windowSec; // epoch seconds
+  const reset = (windowId + 1) * windowSec;
   return { ok: count <= RATE_LIMIT_PER_HOUR, remaining, reset };
 }
 
@@ -455,7 +476,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
 
-  // ---- Rate limit check (before heavy work) ----
+  // Rate limit
   const { ok, remaining, reset } = await rateLimit(req);
   res.setHeader('X-RateLimit-Limit', String(RATE_LIMIT_PER_HOUR));
   res.setHeader('X-RateLimit-Remaining', String(remaining));
@@ -467,7 +488,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
     return;
   }
-  // ----------------------------------------------
 
   try {
     const { prompt } = (req.body ?? {}) as { prompt?: string };
