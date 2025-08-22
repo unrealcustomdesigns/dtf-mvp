@@ -3,12 +3,8 @@ import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
-
-// how many variations to generate
 const VARIATIONS = 3;
-
-// add transparent margin equal to this % of the shorter side
-const MARGIN_FRACTION = 0.12; // 12%
+const MARGIN_FRACTION = 0.12; // 12% transparent margin around model output
 
 // ---------- helpers ----------
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
@@ -25,9 +21,23 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// ---------- image generation (Nebius: black-forest-labs/flux-dev) ----------
+function isPng(buf: Buffer): boolean {
+  return (
+    buf.length > 8 &&
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
+  );
+}
+
+// Normalize any input (jpeg/webp/…) to PNG Buffer
+async function ensurePng(buf: Buffer): Promise<Buffer> {
+  if (isPng(buf)) return buf;
+  const sharp = (await import('sharp')).default;
+  return await sharp(buf).png().toBuffer();
+}
+
+// ---------- image generation (Nebius: flux-dev) ----------
 async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]> {
-  // Nebius (OpenAI-compatible)
   const host  = process.env.NEBIUS_BASE_URL || 'https://api.studio.nebius.ai';
   const key   = process.env.NEBIUS_API_KEY;
   const model = process.env.NEBIUS_IMAGE_MODEL || 'black-forest-labs/flux-dev';
@@ -149,23 +159,23 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
   return PNG.sync.write(out);
 }
 
-async function processOne(basePng: Buffer, trimW: number, trimH: number, idx: number): Promise<Buffer> {
-  const padded  = await step(`pad_margin_${idx}`, () => padTransparentPng(basePng, MARGIN_FRACTION));
-  const resized = await step(`resize_trim_${idx}`,  () => resizeContainWithPngjs(padded, trimW, trimH));
+// process one candidate end-to-end
+async function processOne(baseBuf: Buffer, trimW: number, trimH: number, idx: number): Promise<Buffer> {
+  const normalized = await step(`normalize_${idx}`, () => ensurePng(baseBuf)); // <— NEW
+  const padded     = await step(`pad_margin_${idx}`, () => padTransparentPng(normalized, MARGIN_FRACTION));
+  const resized    = await step(`resize_trim_${idx}`,  () => resizeContainWithPngjs(padded, trimW, trimH));
   if (!Buffer.isBuffer(resized) || resized.length === 0) throw new Error(`resized_empty_${idx}`);
   return resized; // final PNG buffer (no DPI stamping)
 }
 
 // ---------- core ----------
 async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
-  const dpi = 300; // informational only (we size by pixels)
+  const dpi = 300; // informational only
   const trimW = px(widthIn, dpi);
   const trimH = px(heightIn, dpi);
 
-  const bases = await step('base_generate', () => generateBasePngs(prompt, VARIATIONS));
-  const finals = await Promise.all(
-    bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1))
-  );
+  const bases  = await step('base_generate', () => generateBasePngs(prompt, VARIATIONS));
+  const finals = await Promise.all(bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1)));
 
   // Upload each to Blob
   const token = process.env.BLOB_READ_WRITE_TOKEN; // optional
@@ -185,7 +195,7 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
 
 // ---------- handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
-  // CORS (Shopify-friendly)
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
