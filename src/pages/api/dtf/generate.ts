@@ -22,7 +22,7 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// Detect PNG by signature (keep ONLY this copy)
+// Detect PNG by signature (keep ONLY one definition)
 function isPng(buf: Buffer): boolean {
   return (
     buf.length > 8 &&
@@ -31,11 +31,20 @@ function isPng(buf: Buffer): boolean {
   );
 }
 
-// Pure-JS normalize to PNG using image-js (no sharp)
+// Pure-JS normalize to PNG using image-js (typed, no 'any')
+type ImgJsLoaded = {
+  width: number; height: number;
+  toBuffer: (mime: 'image/png') => Uint8Array | Buffer;
+};
+type ImgJsCtor = typeof Image & {
+  load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImgJsLoaded>;
+};
+
 async function ensurePng(buf: Buffer): Promise<Buffer> {
   if (isPng(buf)) return buf;
-  const img = await Image.load(buf);                 // decodes JPEG/WebP/etc.
-  const out = img.toBuffer('image/png');             // Uint8Array | Buffer
+  const I = Image as unknown as ImgJsCtor; // assert the static 'load' method
+  const img = await I.load(buf);           // decode JPEG/WebP/etc. in pure JS
+  const out = img.toBuffer('image/png');   // Uint8Array | Buffer
   return Buffer.isBuffer(out) ? out : Buffer.from(out);
 }
 
@@ -79,9 +88,9 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
 
   const out: Buffer[] = [];
   for (const it of items) {
-    if (it.b64_json) {
+    if (it.b64_json && it.b64_json.length > 0) {
       out.push(Buffer.from(it.b64_json, 'base64'));
-    } else if (it.url) {
+    } else if (it.url && it.url.length > 0) {
       const r = await fetch(it.url);
       if (!r.ok) throw new Error(`Nebius URL fetch ${r.status}`);
       out.push(Buffer.from(await r.arrayBuffer()));
@@ -101,7 +110,7 @@ async function padTransparentPng(pngBuf: Buffer, marginFraction = MARGIN_FRACTIO
 
   const outW = src.width + 2 * pad;
   const outH = src.height + 2 * pad;
-  const out = new PNG({ width: outW, height: outH }); // transparent
+  const out = new PNG({ width: outW, height: outH }); // zeroed => fully transparent
 
   for (let y = 0; y < src.height; y++) {
     const srcStart = y * src.width * 4;
@@ -217,7 +226,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const wIn = Number(widthIn);
     const hIn = Number(heightIn);
 
-    if (!cleanPrompt || !wIn || !hIn) { res.status(400).json({ error: 'prompt, widthIn, heightIn are required' }); return; }
+    if (!cleanPrompt || !wIn || !hIn) {
+      res.status(400).json({ error: 'prompt, widthIn, heightIn are required' });
+      return;
+    }
 
     const out = await generateDTF(cleanPrompt, wIn, hIn);
     res.status(200).json(out);
