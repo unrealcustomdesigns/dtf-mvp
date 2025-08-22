@@ -82,13 +82,17 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen py-8 px-4">
-      {/* Title on dark page background */}
-      <div className="max-w-3xl mx-auto mb-4">
-        <h1 className="text-2xl font-semibold text-white">
-          Unreal Custom Designs DTF Image Generator (Print-Ready)
-        </h1>
-      </div>
+<div className="max-w-3xl mx-auto mb-2 flex items-center justify-between">
+  <h1 className="text-2xl font-semibold text-white">
+    Unreal Custom Designs DTF Image Generator (Print-Ready)
+  </h1>
+  <a
+    href="/gallery"
+    className="inline-flex items-center gap-2 rounded-md bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 text-sm"
+  >
+    View Gallery →
+  </a>
+</div>
 
       {/* White card content */}
       <div className="max-w-3xl mx-auto bg-white rounded-xl shadow-sm p-6 space-y-6 text-black">
