@@ -5,10 +5,8 @@ import { notFound } from 'next/navigation';
 // Next.js 15: params is a Promise in PageProps — await it.
 type PageProps = { params: Promise<{ id: string }> };
 
-function withDownload(u: string | undefined, filename: string): string | undefined {
-  if (!u) return undefined;
-  return `${u}${u.includes('?') ? '&' : '?'}download=${encodeURIComponent(filename)}`;
-}
+const dl = (u: string | undefined, name: string) =>
+  u ? `/api/download?url=${encodeURIComponent(u)}&name=${encodeURIComponent(name)}` : '#';
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { id } = await params;
@@ -20,29 +18,19 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   return {
     title,
     description: 'AI DTF design preview',
-    openGraph: {
-      title,
-      images: [{ url: it.proofUrl }],
-    },
-    twitter: {
-      card: 'summary_large_image',
-      title,
-      images: [it.proofUrl],
-    },
+    openGraph: { title, images: [{ url: it.proofUrl }] },
+    twitter: { card: 'summary_large_image', title, images: [it.proofUrl] },
   };
 }
 
 export default async function DesignPage({ params }: PageProps) {
   const { id } = await params;
   const it = await getItem(id);
-  if (!it || it.status !== 'approved') {
-    notFound();
-  }
+  if (!it || it.status !== 'approved') notFound();
 
-  // Mobile-friendly download URLs (force attachment via ?download=)
-  const pngDL  = withDownload(it.finalUrl, 'dtf.png')!;
-  const svgDL  = withDownload(it.svgUrl, 'dtf.svg');
-  const vpngDL = withDownload(it.vectorPngUrl, 'dtf-vector.png');
+  const pngDL  = dl(it.finalUrl, 'dtf.png');
+  const svgDL  = dl(it.svgUrl, 'dtf.svg');
+  const vpngDL = dl(it.vectorPngUrl, 'dtf-vector.png');
 
   return (
     <div className="min-h-screen bg-[#3A3B3D] p-8 text-white">

@@ -13,6 +13,9 @@ type Item = {
   vectorPngUrl?: string;
 };
 
+const dl = (u: string | undefined, name: string) =>
+  u ? `/api/download?url=${encodeURIComponent(u)}&name=${encodeURIComponent(name)}` : '#';
+
 export default function GalleryGrid({ items }: { items: Item[] }) {
   const [q, setQ] = useState('');
   const [active, setActive] = useState<Item | null>(null);
@@ -70,16 +73,19 @@ export default function GalleryGrid({ items }: { items: Item[] }) {
             <div className="p-3">
               <img src={active.finalUrl} alt={active.prompt} className="w-full h-auto rounded border" />
               <div className="mt-3 flex flex-wrap gap-2">
-                <a className="inline-block bg-emerald-600 text-white px-3 py-1.5 rounded" href={active.finalUrl} download>
+                <a className="inline-block bg-emerald-600 text-white px-3 py-1.5 rounded"
+                   href={dl(active.finalUrl, 'dtf.png')}>
                   Download PNG
                 </a>
                 {active.svgUrl && (
-                  <a className="inline-block bg-indigo-600 text-white px-3 py-1.5 rounded" href={active.svgUrl} download>
+                  <a className="inline-block bg-indigo-600 text-white px-3 py-1.5 rounded"
+                     href={dl(active.svgUrl, 'dtf.svg')}>
                     Download SVG
                   </a>
                 )}
                 {active.vectorPngUrl && (
-                  <a className="inline-block bg-blue-600 text-white px-3 py-1.5 rounded" href={active.vectorPngUrl} download>
+                  <a className="inline-block bg-blue-600 text-white px-3 py-1.5 rounded"
+                     href={dl(active.vectorPngUrl, 'dtf-vector.png')}>
                     Download Vector PNG
                   </a>
                 )}

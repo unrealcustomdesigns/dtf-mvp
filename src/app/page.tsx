@@ -18,6 +18,10 @@ const FIXED_IN = 11;
 const FIXED_DPI = 300;
 const FIXED_PX = FIXED_IN * FIXED_DPI; // 3300
 
+// Build a same-origin download link through /api/download
+const dl = (u: string | undefined, name: string) =>
+  u ? `/api/download?url=${encodeURIComponent(u)}&name=${encodeURIComponent(name)}` : '#';
+
 export default function Home() {
   const [prompt, setPrompt] = useState('');
   const [status, setStatus] = useState<Status>('idle');
@@ -79,12 +83,14 @@ export default function Home() {
 
   return (
     <div className="min-h-screen py-8 px-4">
+      {/* Title on dark page background */}
       <div className="max-w-3xl mx-auto mb-4">
         <h1 className="text-2xl font-semibold text-white">
           Unreal Custom Designs DTF Image Generator (Print-Ready)
         </h1>
       </div>
 
+      {/* White card content */}
       <div className="max-w-3xl mx-auto bg-white rounded-xl shadow-sm p-6 space-y-6 text-black">
         <label className="block">
           <span className="text-sm font-medium">Prompt</span>
@@ -141,18 +147,18 @@ export default function Home() {
             {selected !== null && (
               <div className="pt-2 flex flex-wrap items-center gap-2">
                 <a className="inline-block bg-emerald-600 text-white px-4 py-2 rounded"
-                   href={options[selected].finalUrl} download>
+                   href={dl(options[selected].finalUrl, 'dtf.png')}>
                   Download Selected PNG
                 </a>
                 {options[selected].svgUrl && (
                   <a className="inline-block bg-indigo-600 text-white px-4 py-2 rounded"
-                     href={options[selected].svgUrl} download>
+                     href={dl(options[selected].svgUrl, 'dtf.svg')}>
                     Download SVG
                   </a>
                 )}
                 {options[selected].vectorPngUrl && (
                   <a className="inline-block bg-blue-600 text-white px-4 py-2 rounded"
-                     href={options[selected].vectorPngUrl} download>
+                     href={dl(options[selected].vectorPngUrl, 'dtf-vector.png')}>
                     Download Vector PNG
                   </a>
                 )}
@@ -168,7 +174,7 @@ export default function Home() {
             <img src={proofUrl} alt="DTF proof" className="max-w-full border rounded" />
             {finalUrl && (
               <a className="inline-block mt-3 bg-emerald-600 text-white px-4 py-2 rounded"
-                 href={finalUrl} download>
+                 href={dl(finalUrl, 'dtf.png')}>
                 Download Print-Ready PNG
               </a>
             )}
