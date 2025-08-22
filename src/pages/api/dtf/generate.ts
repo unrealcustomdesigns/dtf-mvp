@@ -5,7 +5,7 @@ import { Image } from 'image-js';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 const VARIATIONS = 3;
-const MARGIN_FRACTION = 0.12; // % of the shorter side to pad transparently
+const MARGIN_FRACTION = 0.12; // 12% transparent margin around the model output
 
 // ---------- small utils ----------
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
@@ -22,6 +22,7 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+// Detect PNG by signature (keep ONLY this copy)
 function isPng(buf: Buffer): boolean {
   return (
     buf.length > 8 &&
@@ -30,55 +31,13 @@ function isPng(buf: Buffer): boolean {
   );
 }
 
-// ---------- image-js normalize (pure JS, typed guards) ----------
-type ImageJsImage = {
-  width: number;
-  height: number;
-  toBuffer: (opts: { format: 'png' }) => Uint8Array | Buffer;
-};
-type ImageJsLoader = {
-  load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImageJsImage>;
-};
-type ModA = { Image: ImageJsLoader };
-type ModB = { default: { Image: ImageJsLoader } };
-type ModC = { default: ImageJsLoader };
-type ModD = { load: ImageJsLoader['load'] };
-
-function hasLoad(x: unknown): x is ImageJsLoader {
-  return typeof x === 'object' && x !== null && typeof (x as { load?: unknown }).load === 'function';
-}
-function isModA(x: unknown): x is ModA {
-  return typeof x === 'object' && x !== null && hasLoad((x as { Image?: unknown }).Image);
-}
-function isModB(x: unknown): x is ModB {
-  return typeof x === 'object' && x !== null &&
-         typeof (x as { default?: unknown }).default === 'object' &&
-         x !== null &&
-         hasLoad(((x as { default: { Image?: unknown } }).default).Image);
-}
-function isModC(x: unknown): x is ModC {
-  return typeof x === 'object' && x !== null && hasLoad((x as { default?: unknown }).default);
-}
-function isModD(x: unknown): x is ModD {
-  return hasLoad(x);
-}
-
-function isPng(buf: Buffer): boolean {
-  return (
-    buf.length > 8 &&
-    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
-    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
-  );
-}
-
-// Pure-JS normalize to PNG using image-js (static import)
+// Pure-JS normalize to PNG using image-js (no sharp)
 async function ensurePng(buf: Buffer): Promise<Buffer> {
   if (isPng(buf)) return buf;
-  const img = await Image.load(buf);                  // decodes JPEG/WebP/etc.
-  const out = img.toBuffer('image/png');              // returns Uint8Array|Buffer
+  const img = await Image.load(buf);                 // decodes JPEG/WebP/etc.
+  const out = img.toBuffer('image/png');             // Uint8Array | Buffer
   return Buffer.isBuffer(out) ? out : Buffer.from(out);
 }
-
 
 // ---------- Nebius image generation (OpenAI-compatible) ----------
 type NebiusItem = { b64_json?: string; url?: string };
@@ -120,9 +79,9 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
 
   const out: Buffer[] = [];
   for (const it of items) {
-    if (typeof it.b64_json === 'string' && it.b64_json.length > 0) {
+    if (it.b64_json) {
       out.push(Buffer.from(it.b64_json, 'base64'));
-    } else if (typeof it.url === 'string' && it.url.length > 0) {
+    } else if (it.url) {
       const r = await fetch(it.url);
       if (!r.ok) throw new Error(`Nebius URL fetch ${r.status}`);
       out.push(Buffer.from(await r.arrayBuffer()));
@@ -194,7 +153,7 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
 
   const out = new PNG({ width: targetW, height: targetH }); // transparent
   const offsetX = Math.max(0, Math.floor((targetW - scaledW) / 2));
-  const offsetY = Math.max(0, Math.floor((targetH - scaledH) ) / 2);
+  const offsetY = Math.max(0, Math.floor((targetH - scaledH) / 2));
 
   for (let y = 0; y < scaledH; y++) {
     const srcStart = y * scaledW * 4;
