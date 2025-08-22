@@ -30,27 +30,21 @@ export default function Home() {
   const [options, setOptions] = useState<Option[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
 
-async function generate() {
-  if (!prompt) return;
+  async function generate() {
+    if (!prompt) return;
+    setStatus('working');
+    setProofUrl(undefined);
+    setFinalUrl(undefined);
+    setOptions([]);
+    setSelected(null);
 
-  // fire analytics event
-  track('generate_clicked', {
-    prompt_len: prompt.length,
-    size_in: 11,         // fixed size for your app
-    dpi: 300
-  });
-
-  setStatus('working');
-  setProofUrl(undefined);
-  setFinalUrl(undefined);
-  setOptions([]);
-  setSelected(null);
-
-  const res = await fetch('/api/dtf/generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt }),
-  });
+    try {
+      const res = await fetch('/api/dtf/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // Backend uses fixed size; only send prompt
+        body: JSON.stringify({ prompt }),
+      });
 
       const text = await res.text();
       let data: ApiResponse = {};
@@ -61,7 +55,8 @@ async function generate() {
       }
 
       if (!res.ok) {
-        const errMsg = 'error' in data && data.error ? data.error : `HTTP ${res.status}: ${text?.slice(0, 200)}`;
+        const errMsg =
+          'error' in data && data.error ? data.error : `HTTP ${res.status}: ${text?.slice(0, 200)}`;
         alert(errMsg);
         setStatus('error');
         return;
@@ -106,7 +101,7 @@ async function generate() {
           <textarea
             className="mt-1 w-full border rounded p-2 text-black placeholder-black"
             rows={4}
-            placeholder='Vector-style bulldog mascot, bold outlines, no text, transparent background'
+            placeholder="Vector-style bulldog mascot, bold outlines, no text, transparent background"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
           />
@@ -125,13 +120,14 @@ async function generate() {
         >
           {status === 'working' ? 'Generating…' : 'Generate'}
         </button>
-{/* Disclaimer */}
-<div className="text-xs text-gray-700 bg-yellow-50 border border-yellow-200 rounded-md p-3 leading-relaxed">
-  <strong>Note:</strong> For best results, download the <strong>SVG</strong> and import it into the gang sheet builder.
-  SVGs scale to any size without losing quality. Our <strong>PNG</strong> output is model-limited to roughly
-  <strong> 8–9″</strong> on the long side; enlarging beyond that will soften edges slightly.
-  For most T-shirt production the difference is minimal, and results should still look great.
-</div>
+
+        {/* Disclaimer */}
+        <div className="text-xs text-gray-700 bg-yellow-50 border border-yellow-200 rounded-md p-3 leading-relaxed">
+          <strong>Note:</strong> For best results, download the <strong>SVG</strong> and import it into the gang sheet builder.
+          SVGs scale to any size without losing quality. Our <strong>PNG</strong> output is model-limited to roughly
+          <strong> 8–9″</strong> on the long side; enlarging beyond that will soften edges slightly.
+          For most T-shirt production the difference is minimal, and results should still look great.
+        </div>
 
         {/* Multi-option gallery */}
         {options.length > 0 && (
