@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
 import { Image } from 'image-js';
 import { Redis } from '@upstash/redis';
-
+import { Analytics } from "@vercel/analytics/next"
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 
 // Behavior
