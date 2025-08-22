@@ -21,6 +21,7 @@ const VECTORIZER_SECRET = process.env.VECTORIZER_API_SECRET || '';
 const VECTORIZER_MODE =
   (process.env.VECTORIZER_MODE as 'production' | 'test' | 'test_preview' | 'preview') || 'production';
 const VECTORIZER_MAX_COLORS = Number(process.env.VECTORIZER_MAX_COLORS || 0) || undefined;
+const VECTORIZER_RETENTION_DAYS = Number(process.env.VECTORIZER_RETENTION_DAYS || 0) || 0;
 
 // ---------- small utils ----------
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
@@ -80,7 +81,7 @@ type NebiusItem = { b64_json?: string; url?: string };
 type NebiusList = { data?: NebiusItem[]; error?: { message?: string } };
 
 async function generateBasePngs(
-  prompt: string,
+  userPrompt: string,
   count: number,
   desiredTrimW: number,
   desiredTrimH: number
@@ -89,6 +90,9 @@ async function generateBasePngs(
   const key   = process.env.NEBIUS_API_KEY;
   const model = process.env.NEBIUS_IMAGE_MODEL || 'black-forest-labs/flux-dev';
   if (!key) throw new Error('NEBIUS_API_KEY is missing');
+
+  // silently prefix the prompt
+  const prompt = `Vector style. ${userPrompt}`;
 
   const size = pickGenSize(Math.max(desiredTrimW, desiredTrimH));
   const accum: Buffer[] = [];
@@ -157,15 +161,12 @@ async function generateBasePngs(
   return accum.slice(0, count);
 }
 
-// ---------- remove.bg (optional background removal) ----------
+// ---------- remove.bg (optional) ----------
 async function removeBackground(png: Buffer): Promise<Buffer> {
   if (!REMOVE_BG_KEY) throw new Error('REMOVE_BG_API_KEY missing');
   const form = new FormData();
-const bytes = Uint8Array.from(png); // ensure ArrayBuffer, not SharedArrayBuffer
-form.append('image_file', new File([bytes], 'input.png', { type: 'image/png' }));
-// If File ever complains in your runtime, use Blob instead:
-// form.append('image_file', new Blob([bytes], { type: 'image/png' }), 'input.png');
-
+  const bytes = Uint8Array.from(png); // Node 22: hand File/Blob a plain ArrayBuffer
+  form.append('image_file', new File([bytes], 'input.png', { type: 'image/png' }));
   form.append('size', REMOVE_BG_SIZE);
   form.append('format', 'png');
   form.append('channels', REMOVE_BG_CHANNELS);
@@ -180,24 +181,23 @@ form.append('image_file', new File([bytes], 'input.png', { type: 'image/png' }))
     const arr = await resp.arrayBuffer();
     return Buffer.from(arr);
   }
-
   const msg = await resp.text();
   throw new Error(`remove.bg ${resp.status}: ${msg}`);
 }
 
-// ---------- vectorizer.ai (optional PNG → SVG) ----------
-async function vectorizeWithVectorizer(png: Buffer): Promise<Buffer> {
+// ---------- vectorizer.ai (PNG → SVG + token) ----------
+type VectorizeResult = { svg: Buffer; token?: string };
+
+async function vectorizeWithVectorizer(png: Buffer): Promise<VectorizeResult> {
   if (!VECTORIZER_ID || !VECTORIZER_SECRET) throw new Error('Vectorizer credentials missing');
   const auth = 'Basic ' + Buffer.from(`${VECTORIZER_ID}:${VECTORIZER_SECRET}`).toString('base64');
 
   const form = new FormData();
   const bytes = Uint8Array.from(png);
-form.append('image', new File([bytes], 'input.png', { type: 'image/png' }));
-// or the Blob variant if needed:
-// form.append('image', new Blob([bytes], { type: 'image/png' }), 'input.png');
-
+  form.append('image', new File([bytes], 'input.png', { type: 'image/png' }));
   form.append('mode', VECTORIZER_MODE);
   if (VECTORIZER_MAX_COLORS) form.append('processing.max_colors', String(VECTORIZER_MAX_COLORS));
+  if (VECTORIZER_RETENTION_DAYS > 0) form.append('policy.retention_days', String(VECTORIZER_RETENTION_DAYS));
 
   const resp = await fetch('https://vectorizer.ai/api/v1/vectorize', {
     method: 'POST',
@@ -205,12 +205,38 @@ form.append('image', new File([bytes], 'input.png', { type: 'image/png' }));
     body: form,
   });
 
+  const token = resp.headers.get('X-Image-Token') || resp.headers.get('x-image-token') || undefined;
+
   if (resp.status === 200) {
     const arr = await resp.arrayBuffer();
-    return Buffer.from(arr); // SVG bytes
+    return { svg: Buffer.from(arr), token };
   }
   const msg = await resp.text();
   throw new Error(`Vectorizer ${resp.status}: ${msg}`);
+}
+
+// Download other formats using Image Token (best effort: try GET with query, then POST form)
+async function vectorizerDownload(token: string, format: 'svg'|'png'|'pdf'|'dxf'): Promise<Buffer> {
+  const auth = 'Basic ' + Buffer.from(`${VECTORIZER_ID}:${VECTORIZER_SECRET}`).toString('base64');
+
+  // Try GET style
+  const url = `https://vectorizer.ai/api/v1/download?token=${encodeURIComponent(token)}&format=${encodeURIComponent(format)}`;
+  let resp = await fetch(url, { headers: { Authorization: auth } });
+  if (resp.ok) return Buffer.from(await resp.arrayBuffer());
+
+  // Fallback: POST form
+  const form = new FormData();
+  form.append('token', token);
+  form.append('format', format);
+  resp = await fetch('https://vectorizer.ai/api/v1/download', {
+    method: 'POST',
+    headers: { Authorization: auth },
+    body: form,
+  });
+  if (resp.ok) return Buffer.from(await resp.arrayBuffer());
+
+  const msg = await resp.text();
+  throw new Error(`Vectorizer download ${resp.status}: ${msg}`);
 }
 
 // ---------- PNGJS helpers ----------
@@ -286,7 +312,12 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
 }
 
 // ---------- per-option pipeline ----------
-type OptionOut = { proofUrl: string; finalUrl: string; svgUrl?: string };
+type OptionOut = {
+  proofUrl: string;
+  finalUrl: string;     // print PNG from our pad+contain path
+  svgUrl?: string;      // vectorizer SVG
+  vectorPngUrl?: string; // optional PNG fetched via vectorizer Download (token)
+};
 
 async function processOne(
   baseBuf: Buffer,
@@ -299,7 +330,7 @@ async function processOne(
   // Normalize to PNG
   let { png: normalized } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
 
-  // Optional background removal (never fail the job)
+  // 1) remove.bg first (user requested)
   if (doRemoveBg) {
     try {
       normalized = await step(`removebg_${idx}`, () => removeBackground(normalized));
@@ -308,27 +339,42 @@ async function processOne(
     }
   }
 
-  // Margin + contain resize
-  const padded  = await step(`pad_margin_${idx}`,  () => padTransparentPng(normalized, MARGIN_FRACTION));
-  const resized = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
-
-  // Upload PNG
-  const id = crypto.randomUUID();
-  const pngBlob = await put(`dtf/${id}-opt${idx}.png`, resized, { access: 'public', contentType: 'image/png' });
-
-  // Optional vectorization (never fail the job)
+  // 2) vectorizer next (multi-format via token)
   let svgUrl: string | undefined;
+  let vectorPngUrl: string | undefined;
   if (doVectorize) {
     try {
-      const svgBuf = await step(`vectorize_${idx}`, () => vectorizeWithVectorizer(resized));
-      const svgBlob = await put(`dtf/${id}-opt${idx}.svg`, svgBuf, { access: 'public', contentType: 'image/svg+xml' });
+      const { svg, token } = await step(`vectorize_${idx}`, () => vectorizeWithVectorizer(normalized));
+      const idv = crypto.randomUUID();
+      const svgBlob = await put(`dtf/${idv}-opt${idx}.svg`, svg, { access: 'public', contentType: 'image/svg+xml' });
       svgUrl = svgBlob.url;
+
+      if (token) {
+        // Try fetching another format (PNG) via the download endpoint
+        try {
+          const vpng = await step(`vectorize_download_${idx}`, () => vectorizerDownload(token, 'png'));
+          const pngBlob = await put(`dtf/${idv}-opt${idx}-vector.png`, vpng, {
+            access: 'public',
+            contentType: 'image/png',
+          });
+          vectorPngUrl = pngBlob.url;
+        } catch (e) {
+          console.warn(`[DTF] vectorizer download PNG failed opt ${idx}:`, e instanceof Error ? e.message : e);
+        }
+      }
     } catch (e) {
       console.warn(`[DTF] vectorizer failed for opt ${idx}:`, e instanceof Error ? e.message : e);
     }
   }
 
-  return { proofUrl: pngBlob.url, finalUrl: pngBlob.url, svgUrl };
+  // 3) Our print PNG path (pad + contain)
+  const padded  = await step(`pad_margin_${idx}`,  () => padTransparentPng(normalized, MARGIN_FRACTION));
+  const resized = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
+
+  const id = crypto.randomUUID();
+  const printBlob = await put(`dtf/${id}-opt${idx}.png`, resized, { access: 'public', contentType: 'image/png' });
+
+  return { proofUrl: printBlob.url, finalUrl: printBlob.url, svgUrl, vectorPngUrl };
 }
 
 // ---------- core ----------
