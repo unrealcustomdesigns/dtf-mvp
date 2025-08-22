@@ -4,6 +4,7 @@ import { put } from '@vercel/blob';
 import { Image } from 'image-js';
 import { Redis } from '@upstash/redis';
 import { addToGallery } from '@/lib/gallery';
+import decode from 'image-decode'; // add at top with other imports
 
 const GALLERY_PUBLISH = String(process.env.GALLERY_PUBLISH || 'false').toLowerCase() === 'true';
 const GALLERY_REQUIRE_APPROVAL = String(process.env.GALLERY_REQUIRE_APPROVAL || 'false').toLowerCase() === 'true';
@@ -68,17 +69,40 @@ type ImgJsCtor = typeof Image & {
   load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImgJsLoaded>;
 };
 
+
 async function ensurePng(buf: Buffer): Promise<{ png: Buffer; isActuallyPng: boolean }> {
   if (isPng(buf)) return { png: buf, isActuallyPng: true };
+
+  // Fallback A: image-js (keeps your current path)
   try {
-    const I = Image as unknown as ImgJsCtor;
+    const I = Image as unknown as {
+      load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<{
+        width: number; height: number; toBuffer: (mime: 'image/png') => Uint8Array | Buffer;
+      }>;
+    };
     const img = await I.load(buf);
     const out = img.toBuffer('image/png');
     return { png: Buffer.isBuffer(out) ? out : Buffer.from(out), isActuallyPng: false };
   } catch {
-    console.warn('[DTF] normalize_fallback_passthrough: could not decode non-PNG');
-    return { png: buf, isActuallyPng: false };
+    // continue
   }
+
+  // Fallback B: image-decode → write PNG with pngjs
+  try {
+    const d = await decode(buf); // { width, height, data (RGBA) }
+    if (d && d.width && d.height && d.data) {
+      const { PNG } = await import('pngjs');
+      const png = new PNG({ width: d.width, height: d.height });
+      png.data.set(d.data);
+      const out = PNG.sync.write(png);
+      return { png: out, isActuallyPng: false };
+    }
+  } catch {
+    // continue
+  }
+
+  console.warn('[DTF] normalize_fallback_passthrough: could not decode non-PNG');
+  return { png: buf, isActuallyPng: false };
 }
 
 // ---------- Nebius (OpenAI-compatible) ----------
@@ -335,11 +359,12 @@ async function processOne(
   doRemoveBg: boolean,
   doVectorize: boolean
 ): Promise<OptionOut> {
+  console.log(`[DTF] option_${idx}`, { removeBg: doRemoveBg, vectorize: doVectorize });
+
   // 0) Normalize
   let { png: current } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
 
   // 1) If still not PNG and user enabled Background Removal, try remove.bg to force PNG.
-  //    If disabled, we may have to skip pad/resize (rare edge case).
   if (!isPng(current)) {
     if (doRemoveBg) {
       try {
@@ -349,7 +374,6 @@ async function processOne(
       }
     }
     if (!isPng(current)) {
-      // Can't safely pad/resize; upload as-is (display + download)
       const idEarly = crypto.randomUUID();
       const earlyBlob = await put(`dtf/${idEarly}-opt${idx}.png`, current, { access: 'public', contentType: 'image/png' });
       return { proofUrl: earlyBlob.url, finalUrl: earlyBlob.url };
@@ -373,7 +397,12 @@ async function processOne(
   // 4) Vectorization (only if toggled on)
   let svgUrl: string | undefined;
   let vectorPngUrl: string | undefined;
-  if (doVectorize) {
+
+  if (!doVectorize) {
+    console.log(`[DTF] SKIP vectorize_${idx}: toggle=false`);
+  } else if (!(VECTORIZER_ID?.trim() && VECTORIZER_SECRET?.trim())) {
+    console.log(`[DTF] SKIP vectorize_${idx}: missing creds`);
+  } else {
     try {
       const { svg, token } = await step(`vectorize_${idx}`, () => vectorizeWithVectorizer(bgOut));
       if (svg) {
@@ -426,6 +455,8 @@ async function processOne(
 
 // ---------- core ----------
 async function generateDTF(prompt: string, doRemoveBg: boolean, doVectorize: boolean) {
+  console.log('[DTF] run', { removeBg: doRemoveBg, vectorize: doVectorize });
+
   const dpi = 300;
   const widthIn = 11;
   const heightIn = 11;
@@ -506,6 +537,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.status(400).json({ error: 'prompt is required' });
       return;
     }
+
+    // Log flags & creds snapshot
+    console.log('[DTF] flags', {
+      removeBg: !!removeBg,
+      vectorize: !!vectorize,
+      hasVectorCreds: !!(VECTORIZER_ID?.trim() && VECTORIZER_SECRET?.trim()),
+      mode: VECTORIZER_MODE,
+      retention: VECTORIZER_RETENTION_DAYS,
+    });
 
     const out = await generateDTF(cleanPrompt, !!removeBg, !!vectorize);
     res.status(200).json(out);
