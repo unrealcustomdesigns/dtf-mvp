@@ -161,7 +161,11 @@ async function generateBasePngs(
 async function removeBackground(png: Buffer): Promise<Buffer> {
   if (!REMOVE_BG_KEY) throw new Error('REMOVE_BG_API_KEY missing');
   const form = new FormData();
-  form.append('image_file', new Blob([png], { type: 'image/png' }), 'input.png');
+const bytes = Uint8Array.from(png); // ensure ArrayBuffer, not SharedArrayBuffer
+form.append('image_file', new File([bytes], 'input.png', { type: 'image/png' }));
+// If File ever complains in your runtime, use Blob instead:
+// form.append('image_file', new Blob([bytes], { type: 'image/png' }), 'input.png');
+
   form.append('size', REMOVE_BG_SIZE);
   form.append('format', 'png');
   form.append('channels', REMOVE_BG_CHANNELS);
@@ -187,7 +191,11 @@ async function vectorizeWithVectorizer(png: Buffer): Promise<Buffer> {
   const auth = 'Basic ' + Buffer.from(`${VECTORIZER_ID}:${VECTORIZER_SECRET}`).toString('base64');
 
   const form = new FormData();
-  form.append('image', new Blob([png], { type: 'image/png' }), 'input.png');
+  const bytes = Uint8Array.from(png);
+form.append('image', new File([bytes], 'input.png', { type: 'image/png' }));
+// or the Blob variant if needed:
+// form.append('image', new Blob([bytes], { type: 'image/png' }), 'input.png');
+
   form.append('mode', VECTORIZER_MODE);
   if (VECTORIZER_MAX_COLORS) form.append('processing.max_colors', String(VECTORIZER_MAX_COLORS));
 
