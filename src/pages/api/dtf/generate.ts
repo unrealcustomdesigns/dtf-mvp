@@ -23,7 +23,7 @@ const VECTORIZER_MODE =
 const VECTORIZER_MAX_COLORS = Number(process.env.VECTORIZER_MAX_COLORS || 0) || undefined;
 const VECTORIZER_RETENTION_DAYS = Number(process.env.VECTORIZER_RETENTION_DAYS || 0) || 0;
 
-// ---------- small utils ----------
+// ---------- utils ----------
 const px = (inches: number, dpi = 300) => Math.round(inches * dpi);
 
 async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
@@ -54,7 +54,7 @@ function pickGenSize(targetMaxSidePx: number): string {
   return `${s}x${s}`;
 }
 
-// ---------- normalize to PNG (pure JS via image-js only) ----------
+// ---------- normalize (pure JS via image-js) ----------
 type ImgJsLoaded = {
   width: number; height: number;
   toBuffer: (mime: 'image/png') => Uint8Array | Buffer;
@@ -76,7 +76,7 @@ async function ensurePng(buf: Buffer): Promise<{ png: Buffer; isActuallyPng: boo
   }
 }
 
-// ---------- Nebius image generation (OpenAI-compatible) ----------
+// ---------- Nebius (OpenAI-compatible) ----------
 type NebiusItem = { b64_json?: string; url?: string };
 type NebiusList = { data?: NebiusItem[]; error?: { message?: string } };
 
@@ -161,11 +161,14 @@ async function generateBasePngs(
   return accum.slice(0, count);
 }
 
-// ---------- remove.bg (optional) ----------
+// ---------- remove.bg ----------
 async function removeBackground(png: Buffer): Promise<Buffer> {
-  if (!REMOVE_BG_KEY) throw new Error('REMOVE_BG_API_KEY missing');
+  if (!REMOVE_BG_KEY) {
+    console.warn('[DTF] remove.bg skipped: no API key');
+    return png;
+  }
   const form = new FormData();
-  const bytes = Uint8Array.from(png); // Node 22: hand File/Blob a plain ArrayBuffer
+  const bytes = Uint8Array.from(png);
   form.append('image_file', new File([bytes], 'input.png', { type: 'image/png' }));
   form.append('size', REMOVE_BG_SIZE);
   form.append('format', 'png');
@@ -185,11 +188,14 @@ async function removeBackground(png: Buffer): Promise<Buffer> {
   throw new Error(`remove.bg ${resp.status}: ${msg}`);
 }
 
-// ---------- vectorizer.ai (PNG → SVG + token) ----------
-type VectorizeResult = { svg: Buffer; token?: string };
+// ---------- vectorizer.ai ----------
+type VectorizeResult = { svg?: Buffer; token?: string };
 
 async function vectorizeWithVectorizer(png: Buffer): Promise<VectorizeResult> {
-  if (!VECTORIZER_ID || !VECTORIZER_SECRET) throw new Error('Vectorizer credentials missing');
+  if (!VECTORIZER_ID || !VECTORIZER_SECRET) {
+    console.warn('[DTF] vectorizer skipped: no API creds');
+    return {};
+  }
   const auth = 'Basic ' + Buffer.from(`${VECTORIZER_ID}:${VECTORIZER_SECRET}`).toString('base64');
 
   const form = new FormData();
@@ -215,16 +221,15 @@ async function vectorizeWithVectorizer(png: Buffer): Promise<VectorizeResult> {
   throw new Error(`Vectorizer ${resp.status}: ${msg}`);
 }
 
-// Download other formats using Image Token (best effort: try GET with query, then POST form)
 async function vectorizerDownload(token: string, format: 'svg'|'png'|'pdf'|'dxf'): Promise<Buffer> {
   const auth = 'Basic ' + Buffer.from(`${VECTORIZER_ID}:${VECTORIZER_SECRET}`).toString('base64');
 
-  // Try GET style
+  // GET style
   const url = `https://vectorizer.ai/api/v1/download?token=${encodeURIComponent(token)}&format=${encodeURIComponent(format)}`;
   let resp = await fetch(url, { headers: { Authorization: auth } });
   if (resp.ok) return Buffer.from(await resp.arrayBuffer());
 
-  // Fallback: POST form
+  // POST fallback
   const form = new FormData();
   form.append('token', token);
   form.append('format', format);
@@ -314,85 +319,85 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
 // ---------- per-option pipeline ----------
 type OptionOut = {
   proofUrl: string;
-  finalUrl: string;     // print PNG from our pad+contain path
-  svgUrl?: string;      // vectorizer SVG
-  vectorPngUrl?: string; // optional PNG fetched via vectorizer Download (token)
+  finalUrl: string;      // our print PNG (after size + remove.bg)
+  svgUrl?: string;       // vectorizer SVG
+  vectorPngUrl?: string; // vectorizer PNG via token (if available)
 };
 
 async function processOne(
   baseBuf: Buffer,
   trimW: number,
   trimH: number,
-  idx: number,
-  doRemoveBg: boolean,
-  doVectorize: boolean
+  idx: number
 ): Promise<OptionOut> {
-  // Normalize to PNG
-  let { png: normalized } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
+  // 0) Normalize to PNG
+  let { png: current } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
 
-  // 1) remove.bg first (user requested)
-  if (doRemoveBg) {
+  // 1) If still not PNG, try remove.bg first to get a PNG; if that fails, just upload the bytes and return
+  if (!isPng(current)) {
     try {
-      normalized = await step(`removebg_${idx}`, () => removeBackground(normalized));
+      current = await step(`removebg_pre_${idx}`, () => removeBackground(current));
     } catch (e) {
-      console.warn(`[DTF] remove.bg failed for opt ${idx}:`, e instanceof Error ? e.message : e);
+      console.warn(`[DTF] remove.bg (pre) failed opt ${idx}:`, e instanceof Error ? e.message : e);
+      const idEarly = crypto.randomUUID();
+      const earlyBlob = await put(`dtf/${idEarly}-opt${idx}.png`, current, { access: 'public', contentType: 'image/png' });
+      return { proofUrl: earlyBlob.url, finalUrl: earlyBlob.url };
     }
   }
 
-  // 2) vectorizer next (multi-format via token)
+  // 2) Size (pad + contain)
+  const padded = await step(`pad_margin_${idx}`, () => padTransparentPng(current, MARGIN_FRACTION));
+  const sized  = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
+
+  // 3) remove.bg after sizing (skip safely if not configured or fails)
+  let bgOut = sized;
+  try {
+    bgOut = await step(`removebg_${idx}`, () => removeBackground(sized));
+  } catch (e) {
+    console.warn(`[DTF] remove.bg failed opt ${idx}:`, e instanceof Error ? e.message : e);
+  }
+
+  // 4) Vectorizer (SVG + extra PNG via token) — never break the job if it fails
   let svgUrl: string | undefined;
   let vectorPngUrl: string | undefined;
-  if (doVectorize) {
-    try {
-      const { svg, token } = await step(`vectorize_${idx}`, () => vectorizeWithVectorizer(normalized));
+  try {
+    const { svg, token } = await step(`vectorize_${idx}`, () => vectorizeWithVectorizer(bgOut));
+    if (svg) {
       const idv = crypto.randomUUID();
       const svgBlob = await put(`dtf/${idv}-opt${idx}.svg`, svg, { access: 'public', contentType: 'image/svg+xml' });
       svgUrl = svgBlob.url;
-
-      if (token) {
-        // Try fetching another format (PNG) via the download endpoint
-        try {
-          const vpng = await step(`vectorize_download_${idx}`, () => vectorizerDownload(token, 'png'));
-          const pngBlob = await put(`dtf/${idv}-opt${idx}-vector.png`, vpng, {
-            access: 'public',
-            contentType: 'image/png',
-          });
-          vectorPngUrl = pngBlob.url;
-        } catch (e) {
-          console.warn(`[DTF] vectorizer download PNG failed opt ${idx}:`, e instanceof Error ? e.message : e);
-        }
-      }
-    } catch (e) {
-      console.warn(`[DTF] vectorizer failed for opt ${idx}:`, e instanceof Error ? e.message : e);
     }
+    if (token) {
+      try {
+        const vpng = await step(`vectorize_download_${idx}`, () => vectorizerDownload(token, 'png'));
+        const idp = crypto.randomUUID();
+        const vpngBlob = await put(`dtf/${idp}-opt${idx}-vector.png`, vpng, {
+          access: 'public', contentType: 'image/png'
+        });
+        vectorPngUrl = vpngBlob.url;
+      } catch (e) {
+        console.warn(`[DTF] vectorizer download PNG failed opt ${idx}:`, e instanceof Error ? e.message : e);
+      }
+    }
+  } catch (e) {
+    console.warn(`[DTF] vectorizer failed opt ${idx}:`, e instanceof Error ? e.message : e);
   }
 
-  // 3) Our print PNG path (pad + contain)
-  const padded  = await step(`pad_margin_${idx}`,  () => padTransparentPng(normalized, MARGIN_FRACTION));
-  const resized = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
-
+  // 5) Upload final print PNG
   const id = crypto.randomUUID();
-  const printBlob = await put(`dtf/${id}-opt${idx}.png`, resized, { access: 'public', contentType: 'image/png' });
+  const printBlob = await put(`dtf/${id}-opt${idx}.png`, bgOut, { access: 'public', contentType: 'image/png' });
 
   return { proofUrl: printBlob.url, finalUrl: printBlob.url, svgUrl, vectorPngUrl };
 }
 
 // ---------- core ----------
-async function generateDTF(prompt: string, widthIn: number, heightIn: number, removeBg: boolean, vectorize: boolean) {
+async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
   const dpi = 300;
   const trimW = px(widthIn, dpi);
   const trimH = px(heightIn, dpi);
 
   const bases  = await step('base_generate', () => generateBasePngs(prompt, VARIATIONS, trimW, trimH));
-  const options = await Promise.all(
-    bases.map((buf, i) =>
-      processOne(
-        buf, trimW, trimH, i + 1,
-        removeBg && !!REMOVE_BG_KEY,
-        vectorize && !!VECTORIZER_ID && !!VECTORIZER_SECRET
-      )
-    )
-  );
+  const options = await Promise.all(bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1)));
   return { options };
 }
 
@@ -407,8 +412,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
 
   try {
-    const { prompt, widthIn, heightIn, removeBg, vectorize } = (req.body ?? {}) as {
-      prompt?: string; widthIn?: number; heightIn?: number; removeBg?: boolean; vectorize?: boolean;
+    const { prompt, widthIn, heightIn } = (req.body ?? {}) as {
+      prompt?: string; widthIn?: number; heightIn?: number;
     };
 
     const cleanPrompt = (prompt ?? '').trim();
@@ -418,7 +423,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return;
     }
 
-    const out = await generateDTF(cleanPrompt, wIn, hIn, !!removeBg, !!vectorize);
+    const out = await generateDTF(cleanPrompt, wIn, hIn);
     res.status(200).json(out);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Failed to generate';
