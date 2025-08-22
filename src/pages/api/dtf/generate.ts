@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
+import { Image } from 'image-js';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 const VARIATIONS = 3;
@@ -62,22 +63,22 @@ function isModD(x: unknown): x is ModD {
   return hasLoad(x);
 }
 
+function isPng(buf: Buffer): boolean {
+  return (
+    buf.length > 8 &&
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
+  );
+}
+
+// Pure-JS normalize to PNG using image-js (static import)
 async function ensurePng(buf: Buffer): Promise<Buffer> {
   if (isPng(buf)) return buf;
-  const modUnknown: unknown = await import('image-js');
-
-  let loader: ImageJsLoader | undefined;
-  if (isModA(modUnknown)) loader = modUnknown.Image;
-  else if (isModB(modUnknown)) loader = modUnknown.default.Image;
-  else if (isModC(modUnknown)) loader = modUnknown.default;
-  else if (isModD(modUnknown)) loader = modUnknown;
-
-  if (!loader) throw new Error('image-js import failed: no Image.load');
-
-  const img = await loader.load(buf);
-  const out = img.toBuffer({ format: 'png' });
+  const img = await Image.load(buf);                  // decodes JPEG/WebP/etc.
+  const out = img.toBuffer('image/png');              // returns Uint8Array|Buffer
   return Buffer.isBuffer(out) ? out : Buffer.from(out);
 }
+
 
 // ---------- Nebius image generation (OpenAI-compatible) ----------
 type NebiusItem = { b64_json?: string; url?: string };
