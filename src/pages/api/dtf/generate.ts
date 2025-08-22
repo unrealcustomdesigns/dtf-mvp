@@ -29,11 +29,31 @@ function isPng(buf: Buffer): boolean {
   );
 }
 
-// Normalize any input (jpeg/webp/…) to PNG Buffer
+function isPng(buf: Buffer): boolean {
+  return (
+    buf.length > 8 &&
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
+  );
+}
+
+// Normalize any input (jpeg/webp/…) to PNG Buffer — pure JS (image-js)
 async function ensurePng(buf: Buffer): Promise<Buffer> {
   if (isPng(buf)) return buf;
-  const sharp = (await import('sharp')).default;
-  return await sharp(buf).png().toBuffer();
+
+  // robust dynamic import (ESM/CJS safe)
+  const mod = await import('image-js');
+  const ImageCls =
+    (mod as any).Image ??
+    ((mod as any).default && (mod as any).default.Image ? (mod as any).default.Image : undefined);
+
+  if (!ImageCls || typeof ImageCls.load !== 'function') {
+    throw new Error('image-js import failed: no Image.load');
+  }
+
+  const img = await ImageCls.load(buf); // decodes JPEG/WebP/etc.
+  const out = img.toBuffer({ format: 'png' }); // returns Uint8Array
+  return Buffer.isBuffer(out) ? out : Buffer.from(out);
 }
 
 // ---------- image generation (Nebius: flux-dev) ----------
