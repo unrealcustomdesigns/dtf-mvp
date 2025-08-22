@@ -1,8 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
-import { Image } from 'image-js';          // static import for fallback normalize
-import decode from 'image-decode';         // primary normalize (pure JS)
+import { Image } from 'image-js';
+import decode from 'image-decode';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 const VARIATIONS = 3;
@@ -33,6 +33,13 @@ function isPng(buf: Buffer): boolean {
 
 // ---------- robust normalize to PNG (pure JS) ----------
 type Decoded = { width: number; height: number; data: Uint8Array };
+type ImgJsLoaded = {
+  width: number; height: number;
+  toBuffer: (mime: 'image/png') => Uint8Array | Buffer;
+};
+type ImgJsCtor = typeof Image & {
+  load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImgJsLoaded>;
+};
 
 async function tryDecodeWithImageDecode(buf: Buffer): Promise<Buffer | null> {
   try {
@@ -42,18 +49,8 @@ async function tryDecodeWithImageDecode(buf: Buffer): Promise<Buffer | null> {
     const png = new PNG({ width: d.width, height: d.height });
     png.data.set(d.data);
     return PNG.sync.write(png);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
-
-type ImgJsLoaded = {
-  width: number; height: number;
-  toBuffer: (mime: 'image/png') => Uint8Array | Buffer;
-};
-type ImgJsCtor = typeof Image & {
-  load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImgJsLoaded>;
-};
 
 async function tryDecodeWithImageJs(buf: Buffer): Promise<Buffer | null> {
   try {
@@ -61,23 +58,18 @@ async function tryDecodeWithImageJs(buf: Buffer): Promise<Buffer | null> {
     const img = await I.load(buf);
     const out = img.toBuffer('image/png');
     return Buffer.isBuffer(out) ? out : Buffer.from(out);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function ensurePng(buf: Buffer): Promise<{ png: Buffer; isActuallyPng: boolean }> {
   if (isPng(buf)) return { png: buf, isActuallyPng: true };
 
-  // 1) image-decode primary path
   const dec1 = await tryDecodeWithImageDecode(buf);
   if (dec1) return { png: dec1, isActuallyPng: false };
 
-  // 2) image-js fallback
   const dec2 = await tryDecodeWithImageJs(buf);
   if (dec2) return { png: dec2, isActuallyPng: false };
 
-  // 3) give up — return original and let caller decide how to handle
   console.warn('[DTF] normalize_fallback_passthrough: could not decode non-PNG');
   return { png: buf, isActuallyPng: false };
 }
@@ -101,10 +93,7 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
 
     const resp = await fetch(`${host}/v1/images/generations`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model,
         prompt:
@@ -112,7 +101,7 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
           `Transparent background. Centered subject. Full subject in frame. Extra space from edges. ` +
           `Clean edges. No watermark. No text.`,
         size: '1024x1024',
-        n: remaining  // ask for the remaining each time
+        n: remaining
       }),
     });
 
@@ -126,71 +115,39 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
     const json = JSON.parse(text) as NebiusList;
     const items = Array.isArray(json.data) ? json.data : [];
     if (!items.length) {
-      console.warn('[DTF] base_generate: provider returned 0 items; retrying once');
+      console.warn('[DTF] base_generate: provider returned 0 items; retrying');
       await new Promise(r => setTimeout(r, 600));
       continue;
     }
 
-    // Convert items -> buffers, append
     for (const it of items) {
       if (it.b64_json && it.b64_json.length > 0) {
         accum.push(Buffer.from(it.b64_json, 'base64'));
       } else if (it.url && it.url.length > 0) {
         const r = await fetch(it.url);
-        if (!r.ok) {
-          console.warn(`[DTF] base_generate: url fetch ${r.status}; skipping this item`);
-          continue;
-        }
+        if (!r.ok) { console.warn(`[DTF] base_generate: url fetch ${r.status}; skipping`); continue; }
         accum.push(Buffer.from(await r.arrayBuffer()));
       }
       if (accum.length >= count) break;
     }
 
     remaining = count - accum.length;
-
-    // Small backoff if we still need more
     if (remaining > 0) await new Promise(r => setTimeout(r, 400));
   }
 
   if (!accum.length) throw new Error('Nebius returned no usable image buffers');
   if (accum.length < count) {
-    console.warn(`[DTF] base_generate: got only ${accum.length}/${count} images after ${attempts} attempt(s)`);
+    console.warn(`[DTF] base_generate: got only ${accum.length}/${count} after ${attempts} attempt(s)`);
   } else {
     console.log(`[DTF] base_generate: got ${accum.length}/${count}`);
   }
   return accum.slice(0, count);
 }
 
-
-  const text = await resp.text();
-  if (!resp.ok) {
-    let msg = text;
-    try { msg = (JSON.parse(text) as NebiusList)?.error?.message || msg; } catch {}
-    throw new Error(`Nebius error (${resp.status}): ${msg}`);
-  }
-
-  const json = JSON.parse(text) as NebiusList;
-  const items = Array.isArray(json.data) ? json.data : [];
-  if (!items.length) throw new Error('Nebius response missing data array');
-
-  const out: Buffer[] = [];
-  for (const it of items) {
-    if (it.b64_json && it.b64_json.length > 0) {
-      out.push(Buffer.from(it.b64_json, 'base64'));
-    } else if (it.url && it.url.length > 0) {
-      const r = await fetch(it.url);
-      if (!r.ok) throw new Error(`Nebius URL fetch ${r.status}`);
-      out.push(Buffer.from(await r.arrayBuffer()));
-    }
-  }
-  if (!out.length) throw new Error('Nebius returned no usable image buffers');
-  return out;
-}
-
 // ---------- PNGJS helpers ----------
 async function padTransparentPng(pngBuf: Buffer, marginFraction = MARGIN_FRACTION): Promise<Buffer> {
   const { PNG } = await import('pngjs');
-  const src = PNG.sync.read(pngBuf); // { width, height, data }
+  const src = PNG.sync.read(pngBuf);
 
   const base = Math.min(src.width, src.height);
   const pad = Math.max(1, Math.floor(base * Math.max(0, marginFraction)));
@@ -260,9 +217,8 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
 }
 
 // process one candidate end-to-end (normalize -> pad -> resize)
-// If normalization fails to produce a PNG, we return the original as-is (logged above) and skip pad/resize for that item.
 async function processOne(baseBuf: Buffer, trimW: number, trimH: number, idx: number): Promise<Buffer> {
-  const { png: normalized, isActuallyPng } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
+  const { png: normalized } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
 
   if (!isPng(normalized)) {
     console.warn(`[DTF] normalize_fallback_passthrough_${idx}: non-PNG kept as-is`);
@@ -305,7 +261,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // CORS
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type', 'Authorization');
 
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
