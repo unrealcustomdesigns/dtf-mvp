@@ -4,7 +4,7 @@ import GalleryGrid from './grid';
 export const revalidate = 60; // refresh list every 60s
 
 export default async function GalleryPage() {
-  const items = await getLatest(60, 'approved'); // show only approved items
+  const items = await getLatest(60, 'approved');
   return (
     <div className="min-h-screen bg-[#3A3B3D] py-8 px-4">
       <div className="max-w-6xl mx-auto">
