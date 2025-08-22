@@ -92,22 +92,75 @@ async function generateBasePngs(prompt: string, count: number): Promise<Buffer[]
   const model = process.env.NEBIUS_IMAGE_MODEL || 'black-forest-labs/flux-dev';
   if (!key) throw new Error('NEBIUS_API_KEY is missing');
 
-  const resp = await fetch(`${host}/v1/images/generations`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      prompt:
-        `${prompt}\n` +
-        `Transparent background. Centered subject. Full subject in frame. Extra space from edges. ` +
-        `Clean edges. No watermark. No text.`,
-      size: '1024x1024',
-      n: count,
-    }),
-  });
+  const accum: Buffer[] = [];
+  let remaining = Math.max(1, Math.floor(count));
+  let attempts = 0;
+
+  while (remaining > 0 && attempts < 6) {
+    attempts++;
+
+    const resp = await fetch(`${host}/v1/images/generations`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        prompt:
+          `${prompt}\n` +
+          `Transparent background. Centered subject. Full subject in frame. Extra space from edges. ` +
+          `Clean edges. No watermark. No text.`,
+        size: '1024x1024',
+        n: remaining  // ask for the remaining each time
+      }),
+    });
+
+    const text = await resp.text();
+    if (!resp.ok) {
+      let msg = text;
+      try { msg = (JSON.parse(text) as NebiusList)?.error?.message || msg; } catch {}
+      throw new Error(`Nebius error (${resp.status}): ${msg}`);
+    }
+
+    const json = JSON.parse(text) as NebiusList;
+    const items = Array.isArray(json.data) ? json.data : [];
+    if (!items.length) {
+      console.warn('[DTF] base_generate: provider returned 0 items; retrying once');
+      await new Promise(r => setTimeout(r, 600));
+      continue;
+    }
+
+    // Convert items -> buffers, append
+    for (const it of items) {
+      if (it.b64_json && it.b64_json.length > 0) {
+        accum.push(Buffer.from(it.b64_json, 'base64'));
+      } else if (it.url && it.url.length > 0) {
+        const r = await fetch(it.url);
+        if (!r.ok) {
+          console.warn(`[DTF] base_generate: url fetch ${r.status}; skipping this item`);
+          continue;
+        }
+        accum.push(Buffer.from(await r.arrayBuffer()));
+      }
+      if (accum.length >= count) break;
+    }
+
+    remaining = count - accum.length;
+
+    // Small backoff if we still need more
+    if (remaining > 0) await new Promise(r => setTimeout(r, 400));
+  }
+
+  if (!accum.length) throw new Error('Nebius returned no usable image buffers');
+  if (accum.length < count) {
+    console.warn(`[DTF] base_generate: got only ${accum.length}/${count} images after ${attempts} attempt(s)`);
+  } else {
+    console.log(`[DTF] base_generate: got ${accum.length}/${count}`);
+  }
+  return accum.slice(0, count);
+}
+
 
   const text = await resp.text();
   if (!resp.ok) {
