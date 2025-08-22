@@ -1,6 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
+import { Image } from 'image-js';          // static import for fallback normalize
+import decode from 'image-decode';         // primary normalize (pure JS)
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 const VARIATIONS = 3;
@@ -21,7 +23,6 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// Detect PNG by signature
 function isPng(buf: Buffer): boolean {
   return (
     buf.length > 8 &&
@@ -30,30 +31,55 @@ function isPng(buf: Buffer): boolean {
   );
 }
 
-// ---------- Pure-JS normalize to PNG using image-decode + pngjs ----------
+// ---------- robust normalize to PNG (pure JS) ----------
 type Decoded = { width: number; height: number; data: Uint8Array };
-type DecodeFn = (data: ArrayBuffer | Uint8Array | Buffer) => Promise<Decoded>;
-type DecodeModule =
-  | { default: DecodeFn }
-  | DecodeFn
-  | { default?: unknown };
 
-async function ensurePng(buf: Buffer): Promise<Buffer> {
-  if (isPng(buf)) return buf;
-
-  const mod: DecodeModule = (await import('image-decode')) as unknown as DecodeModule;
-  let decodeFn: DecodeFn | undefined;
-  if (typeof mod === 'function') decodeFn = mod as DecodeFn;
-  else if (typeof (mod as { default?: unknown }).default === 'function') {
-    decodeFn = (mod as { default: unknown }).default as DecodeFn;
+async function tryDecodeWithImageDecode(buf: Buffer): Promise<Buffer | null> {
+  try {
+    const d: Decoded = await decode(buf);
+    if (!d || !d.width || !d.height || !d.data) return null;
+    const { PNG } = await import('pngjs');
+    const png = new PNG({ width: d.width, height: d.height });
+    png.data.set(d.data);
+    return PNG.sync.write(png);
+  } catch {
+    return null;
   }
-  if (!decodeFn) throw new Error('image-decode import failed');
+}
 
-  const { width, height, data } = await decodeFn(buf);
-  const { PNG } = await import('pngjs');
-  const png = new PNG({ width, height });
-  png.data.set(data);
-  return PNG.sync.write(png);
+type ImgJsLoaded = {
+  width: number; height: number;
+  toBuffer: (mime: 'image/png') => Uint8Array | Buffer;
+};
+type ImgJsCtor = typeof Image & {
+  load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImgJsLoaded>;
+};
+
+async function tryDecodeWithImageJs(buf: Buffer): Promise<Buffer | null> {
+  try {
+    const I = Image as unknown as ImgJsCtor;
+    const img = await I.load(buf);
+    const out = img.toBuffer('image/png');
+    return Buffer.isBuffer(out) ? out : Buffer.from(out);
+  } catch {
+    return null;
+  }
+}
+
+async function ensurePng(buf: Buffer): Promise<{ png: Buffer; isActuallyPng: boolean }> {
+  if (isPng(buf)) return { png: buf, isActuallyPng: true };
+
+  // 1) image-decode primary path
+  const dec1 = await tryDecodeWithImageDecode(buf);
+  if (dec1) return { png: dec1, isActuallyPng: false };
+
+  // 2) image-js fallback
+  const dec2 = await tryDecodeWithImageJs(buf);
+  if (dec2) return { png: dec2, isActuallyPng: false };
+
+  // 3) give up — return original and let caller decide how to handle
+  console.warn('[DTF] normalize_fallback_passthrough: could not decode non-PNG');
+  return { png: buf, isActuallyPng: false };
 }
 
 // ---------- Nebius image generation (OpenAI-compatible) ----------
@@ -129,10 +155,9 @@ async function padTransparentPng(pngBuf: Buffer, marginFraction = MARGIN_FRACTIO
   return PNG.sync.write(out);
 }
 
-// contain scale (no crop) + center on transparent canvas (bilinear)
 async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: number): Promise<Buffer> {
   const { PNG } = await import('pngjs');
-  const src = PNG.sync.read(pngBuf); // { width, height, data }
+  const src = PNG.sync.read(pngBuf);
 
   const scale = Math.min(targetW / src.width, targetH / src.height);
   const scaledW = Math.max(1, Math.round(src.width * scale));
@@ -182,10 +207,17 @@ async function resizeContainWithPngjs(pngBuf: Buffer, targetW: number, targetH: 
 }
 
 // process one candidate end-to-end (normalize -> pad -> resize)
+// If normalization fails to produce a PNG, we return the original as-is (logged above) and skip pad/resize for that item.
 async function processOne(baseBuf: Buffer, trimW: number, trimH: number, idx: number): Promise<Buffer> {
-  const normalized = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
-  const padded     = await step(`pad_margin_${idx}`, () => padTransparentPng(normalized, MARGIN_FRACTION));
-  const resized    = await step(`resize_trim_${idx}`,  () => resizeContainWithPngjs(padded, trimW, trimH));
+  const { png: normalized, isActuallyPng } = await step(`normalize_${idx}`, () => ensurePng(baseBuf));
+
+  if (!isPng(normalized)) {
+    console.warn(`[DTF] normalize_fallback_passthrough_${idx}: non-PNG kept as-is`);
+    return normalized;
+  }
+
+  const padded  = await step(`pad_margin_${idx}`,  () => padTransparentPng(normalized, MARGIN_FRACTION));
+  const resized = await step(`resize_trim_${idx}`, () => resizeContainWithPngjs(padded, trimW, trimH));
   if (!Buffer.isBuffer(resized) || resized.length === 0) throw new Error(`resized_empty_${idx}`);
   return resized;
 }
