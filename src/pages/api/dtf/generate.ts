@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'node:crypto';
 import { put } from '@vercel/blob';
 import { Image } from 'image-js';
+import { Redis } from '@upstash/redis';
 
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN ?? '*';
 
@@ -402,19 +403,74 @@ async function generateDTF(prompt: string) {
   const options = await Promise.all(bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1)));
   return { options };
 }
+// ----- RATE LIMIT (Upstash Redis) -----
+const RATE_LIMIT_PER_HOUR = Number(process.env.RATE_LIMIT_PER_HOUR || 10);
+
+const redis = process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+  ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN })
+  : null;
+
+/** Fixed-window limiter: increments a counter for this hour; returns {ok, remaining, reset} */
+async function rateLimit(req: NextApiRequest): Promise<{ ok: boolean; remaining: number; reset: number }> {
+  if (!redis) {
+    // no redis configured => allow everything
+    return { ok: true, remaining: RATE_LIMIT_PER_HOUR, reset: Math.ceil(Date.now() / 1000) + 3600 };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const windowSec = 3600;
+  const windowId = Math.floor(nowSec / windowSec);
+
+  // fingerprint per IP+UA (hash to avoid storing raw IP)
+  const ip = (req.headers['x-forwarded-for']?.toString().split(',')[0] || req.socket.remoteAddress || 'unknown');
+  const ua = req.headers['user-agent'] || '';
+  const fp = crypto.createHash('sha256').update(`${ip}|${ua}`).digest('hex');
+
+  const key = `rl:${fp}:${windowId}`;
+  const count = await redis.incr(key);
+  if (count === 1) {
+    await redis.expire(key, windowSec);
+  }
+
+  const remaining = Math.max(0, RATE_LIMIT_PER_HOUR - count);
+  const reset = (windowId + 1) * windowSec; // epoch seconds
+  return { ok: count <= RATE_LIMIT_PER_HOUR, remaining, reset };
+}
 
 // ---------- handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  if (req.method === 'OPTIONS') { res.status(204).end(); return; }
-  if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' });
+    return;
+  }
+
+  // ---- Rate limit check (before heavy work) ----
+  const { ok, remaining, reset } = await rateLimit(req);
+  res.setHeader('X-RateLimit-Limit', String(RATE_LIMIT_PER_HOUR));
+  res.setHeader('X-RateLimit-Remaining', String(remaining));
+  res.setHeader('X-RateLimit-Reset', String(reset));
+  if (!ok) {
+    res.setHeader('Retry-After', String(Math.max(0, reset - Math.floor(Date.now() / 1000))));
+    res.status(429).json({
+      error: `Rate limit exceeded. Try again after ${new Date(reset * 1000).toLocaleTimeString()}.`
+    });
+    return;
+  }
+  // ----------------------------------------------
 
   try {
     const { prompt } = (req.body ?? {}) as { prompt?: string };
     const cleanPrompt = (prompt ?? '').trim();
+
     if (!cleanPrompt) {
       res.status(400).json({ error: 'prompt is required' });
       return;
