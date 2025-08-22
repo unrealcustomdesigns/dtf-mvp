@@ -3,29 +3,25 @@
 import { useState } from 'react';
 
 type Status = 'idle' | 'working' | 'done' | 'error';
-type Option = { proofUrl: string; finalUrl: string; svgUrl?: string };
+type Option = { proofUrl: string; finalUrl: string; svgUrl?: string; vectorPngUrl?: string };
 
-// API response shapes (typed — no `any`)
 type ApiMulti = { options: Option[]; error?: string };
 type ApiSingle = { proofUrl?: string; finalUrl?: string; error?: string };
 type ApiResponse = ApiMulti | ApiSingle | { error?: string };
 
+const FIXED_IN = 11;
+const FIXED_DPI = 300;
+const FIXED_PX = FIXED_IN * FIXED_DPI; // 3300
+
 export default function Home() {
   const [prompt, setPrompt] = useState('');
-  const [widthIn, setWidthIn] = useState<number>(11);
-  const [heightIn, setHeightIn] = useState<number>(11);
   const [status, setStatus] = useState<Status>('idle');
 
-  // Single-result (back-compat)
   const [proofUrl, setProofUrl] = useState<string>();
   const [finalUrl, setFinalUrl] = useState<string>();
 
-  // Multi-result (3 options)
   const [options, setOptions] = useState<Option[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
-
-  const dpi = 300;
-  const px = (n: number) => Math.round(n * dpi);
 
   async function generate() {
     if (!prompt) return;
@@ -39,11 +35,7 @@ export default function Home() {
       const res = await fetch('/api/dtf/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt,
-          widthIn: Number(widthIn),
-          heightIn: Number(heightIn),
-        }),
+        body: JSON.stringify({ prompt }), // server fixes size to 11x11
       });
 
       const text = await res.text();
@@ -86,56 +78,27 @@ export default function Home() {
 
   return (
     <div className="min-h-screen py-8 px-4">
-      {/* Title on dark page background */}
       <div className="max-w-3xl mx-auto mb-4">
         <h1 className="text-2xl font-semibold text-white">
           Unreal Custom Designs DTF Image Generator (Print-Ready)
         </h1>
       </div>
 
-      {/* White card content */}
       <div className="max-w-3xl mx-auto bg-white rounded-xl shadow-sm p-6 space-y-6 text-black">
         <label className="block">
           <span className="text-sm font-medium">Prompt</span>
           <textarea
             className="mt-1 w-full border rounded p-2 text-black placeholder-black"
             rows={4}
-            placeholder="Vector-style bulldog mascot, bold outlines, no text, transparent background"
+            placeholder='Vector-style bulldog mascot, bold outlines, no text, transparent background'
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
           />
         </label>
 
-        <div className="grid grid-cols-2 gap-4">
-          <label className="block">
-            <span className="text-sm font-medium">Width (inches)</span>
-            <input
-              type="number"
-              min={1}
-              step="0.5"
-              className="mt-1 w-full border rounded p-2 text-black placeholder-black"
-              value={widthIn}
-              onChange={(e) => setWidthIn(Number(e.target.value))}
-            />
-          </label>
-          <label className="block">
-            <span className="text-sm font-medium">Height (inches)</span>
-            <input
-              type="number"
-              min={1}
-              step="0.5"
-              className="mt-1 w-full border rounded p-2 text-black placeholder-black"
-              value={heightIn}
-              onChange={(e) => setHeightIn(Number(e.target.value))}
-            />
-          </label>
-        </div>
-
-        {/* Optional features */}
-
         <div className="text-xs">
-          <div><strong>DPI:</strong> 300 (pixels shown are trim size; no bleed)</div>
-          <div className="mt-1">Trim: {px(widthIn)} × {px(heightIn)} px</div>
+          <div><strong>Fixed size:</strong> {FIXED_IN}" × {FIXED_IN}"</div>
+          <div className="mt-1">Pixels @300 DPI: {FIXED_PX} × {FIXED_PX}</div>
         </div>
 
         <button
@@ -188,7 +151,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* Single-image fallback (old response shape) */}
+        {/* Single-image fallback (legacy) */}
         {options.length === 0 && proofUrl && (
           <div className="border rounded p-3">
             <div className="text-sm mb-2">Proof</div>

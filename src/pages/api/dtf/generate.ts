@@ -391,10 +391,12 @@ async function processOne(
 }
 
 // ---------- core ----------
-async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
+async function generateDTF(prompt: string) {
   const dpi = 300;
-  const trimW = px(widthIn, dpi);
-  const trimH = px(heightIn, dpi);
+  const widthIn = 11;
+  const heightIn = 11;
+  const trimW = px(widthIn, dpi);  // 3300
+  const trimH = px(heightIn, dpi); // 3300
 
   const bases  = await step('base_generate', () => generateBasePngs(prompt, VARIATIONS, trimW, trimH));
   const options = await Promise.all(bases.map((buf, i) => processOne(buf, trimW, trimH, i + 1)));
@@ -403,7 +405,6 @@ async function generateDTF(prompt: string, widthIn: number, heightIn: number) {
 
 // ---------- handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -412,18 +413,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method Not Allowed' }); return; }
 
   try {
-    const { prompt, widthIn, heightIn } = (req.body ?? {}) as {
-      prompt?: string; widthIn?: number; heightIn?: number;
-    };
-
+    const { prompt } = (req.body ?? {}) as { prompt?: string };
     const cleanPrompt = (prompt ?? '').trim();
-    const wIn = Number(widthIn), hIn = Number(heightIn);
-    if (!cleanPrompt || !wIn || !hIn) {
-      res.status(400).json({ error: 'prompt, widthIn, heightIn are required' });
+    if (!cleanPrompt) {
+      res.status(400).json({ error: 'prompt is required' });
       return;
     }
 
-    const out = await generateDTF(cleanPrompt, wIn, hIn);
+    const out = await generateDTF(cleanPrompt);
     res.status(200).json(out);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Failed to generate';
