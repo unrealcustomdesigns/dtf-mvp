@@ -82,17 +82,19 @@ export default function Home() {
   }
 
   return (
-<div className="max-w-3xl mx-auto mb-2 flex items-center justify-between">
-  <h1 className="text-2xl font-semibold text-white">
-    Unreal Custom Designs DTF Image Generator (Print-Ready)
-  </h1>
-  <a
-    href="/gallery"
-    className="inline-flex items-center gap-2 rounded-md bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 text-sm"
-  >
-    View Gallery →
-  </a>
-</div>
+    <div className="min-h-screen py-8 px-4">
+      {/* Header: title + View Gallery button in ONE wrapper */}
+      <div className="max-w-3xl mx-auto mb-4 flex items-center justify-between">
+        <h1 className="text-2xl font-semibold text-white">
+          Unreal Custom Designs DTF Image Generator (Print-Ready)
+        </h1>
+        <a
+          href="/gallery"
+          className="inline-flex items-center gap-2 rounded-md bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 text-sm"
+        >
+          View Gallery →
+        </a>
+      </div>
 
       {/* White card content */}
       <div className="max-w-3xl mx-auto bg-white rounded-xl shadow-sm p-6 space-y-6 text-black">
@@ -150,19 +152,25 @@ export default function Home() {
 
             {selected !== null && (
               <div className="pt-2 flex flex-wrap items-center gap-2">
-                <a className="inline-block bg-emerald-600 text-white px-4 py-2 rounded"
-                   href={dl(options[selected].finalUrl, 'dtf.png')}>
+                <a
+                  className="inline-block bg-emerald-600 text-white px-4 py-2 rounded"
+                  href={dl(options[selected].finalUrl, 'dtf.png')}
+                >
                   Download Selected PNG
                 </a>
                 {options[selected].svgUrl && (
-                  <a className="inline-block bg-indigo-600 text-white px-4 py-2 rounded"
-                     href={dl(options[selected].svgUrl, 'dtf.svg')}>
+                  <a
+                    className="inline-block bg-indigo-600 text-white px-4 py-2 rounded"
+                    href={dl(options[selected].svgUrl, 'dtf.svg')}
+                  >
                     Download SVG
                   </a>
                 )}
                 {options[selected].vectorPngUrl && (
-                  <a className="inline-block bg-blue-600 text-white px-4 py-2 rounded"
-                     href={dl(options[selected].vectorPngUrl, 'dtf-vector.png')}>
+                  <a
+                    className="inline-block bg-blue-600 text-white px-4 py-2 rounded"
+                    href={dl(options[selected].vectorPngUrl, 'dtf-vector.png')}
+                  >
                     Download Vector PNG
                   </a>
                 )}
@@ -177,8 +185,10 @@ export default function Home() {
             <div className="text-sm mb-2">Proof</div>
             <img src={proofUrl} alt="DTF proof" className="max-w-full border rounded" />
             {finalUrl && (
-              <a className="inline-block mt-3 bg-emerald-600 text-white px-4 py-2 rounded"
-                 href={dl(finalUrl, 'dtf.png')}>
+              <a
+                className="inline-block mt-3 bg-emerald-600 text-white px-4 py-2 rounded"
+                href={dl(finalUrl, 'dtf.png')}
+              >
                 Download Print-Ready PNG
               </a>
             )}
