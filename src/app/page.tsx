@@ -3,7 +3,7 @@
 import { useState } from 'react';
 
 type Status = 'idle' | 'working' | 'done' | 'error';
-type Option = { proofUrl: string; finalUrl: string };
+type Option = { proofUrl: string; finalUrl: string; svgUrl?: string };
 
 // API response shapes (typed — no `any`)
 type ApiMulti = { options: Option[]; error?: string };
@@ -15,6 +15,10 @@ export default function Home() {
   const [widthIn, setWidthIn] = useState<number>(11);
   const [heightIn, setHeightIn] = useState<number>(11);
   const [status, setStatus] = useState<Status>('idle');
+
+  // Feature toggles
+  const [removeBg, setRemoveBg] = useState(false);
+  const [vectorize, setVectorize] = useState(false);
 
   // Single-result (back-compat)
   const [proofUrl, setProofUrl] = useState<string>();
@@ -39,7 +43,13 @@ export default function Home() {
       const res = await fetch('/api/dtf/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, widthIn: Number(widthIn), heightIn: Number(heightIn) }),
+        body: JSON.stringify({
+          prompt,
+          widthIn: Number(widthIn),
+          heightIn: Number(heightIn),
+          removeBg,
+          vectorize,
+        }),
       });
 
       const text = await res.text();
@@ -127,6 +137,18 @@ export default function Home() {
           </label>
         </div>
 
+        {/* Optional features */}
+        <div className="flex flex-wrap items-center gap-6">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={removeBg} onChange={e => setRemoveBg(e.target.checked)} />
+            Remove background (remove.bg)
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={vectorize} onChange={e => setVectorize(e.target.checked)} />
+            Vectorize to SVG (Vectorizer.AI)
+          </label>
+        </div>
+
         <div className="text-xs">
           <div><strong>DPI:</strong> 300 (pixels shown are trim size; no bleed)</div>
           <div className="mt-1">Trim: {px(widthIn)} × {px(heightIn)} px</div>
@@ -160,7 +182,7 @@ export default function Home() {
             </div>
 
             {selected !== null && (
-              <div className="pt-2">
+              <div className="pt-2 flex flex-wrap items-center gap-2">
                 <a
                   className="inline-block bg-emerald-600 text-white px-4 py-2 rounded"
                   href={options[selected].finalUrl}
@@ -168,6 +190,15 @@ export default function Home() {
                 >
                   Download Selected PNG
                 </a>
+                {options[selected].svgUrl && (
+                  <a
+                    className="inline-block bg-indigo-600 text-white px-4 py-2 rounded"
+                    href={options[selected].svgUrl}
+                    download
+                  >
+                    Download SVG
+                  </a>
+                )}
               </div>
             )}
           </div>
