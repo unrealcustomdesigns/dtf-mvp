@@ -30,21 +30,27 @@ export default function Home() {
   const [options, setOptions] = useState<Option[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
 
-  async function generate() {
-    if (!prompt) return;
-    setStatus('working');
-    setProofUrl(undefined);
-    setFinalUrl(undefined);
-    setOptions([]);
-    setSelected(null);
+async function generate() {
+  if (!prompt) return;
 
-    try {
-      const res = await fetch('/api/dtf/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // Backend fixes the size to 11×11; we only send the prompt.
-        body: JSON.stringify({ prompt }),
-      });
+  // fire analytics event
+  track('generate_clicked', {
+    prompt_len: prompt.length,
+    size_in: 11,         // fixed size for your app
+    dpi: 300
+  });
+
+  setStatus('working');
+  setProofUrl(undefined);
+  setFinalUrl(undefined);
+  setOptions([]);
+  setSelected(null);
+
+  const res = await fetch('/api/dtf/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt }),
+  });
 
       const text = await res.text();
       let data: ApiResponse = {};
