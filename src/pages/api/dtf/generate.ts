@@ -69,11 +69,18 @@ type ImgJsCtor = typeof Image & {
   load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<ImgJsLoaded>;
 };
 
-
 async function ensurePng(buf: Buffer): Promise<{ png: Buffer; isActuallyPng: boolean }> {
+  // If it's already PNG, we're done
   if (isPng(buf)) return { png: buf, isActuallyPng: true };
 
-  // Fallback A: image-js (keeps your current path)
+  // Guard 1: don't attempt decoding absurdly large payloads
+  const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+  if (buf.length > MAX_BYTES) {
+    console.warn('[DTF] decode_guard: buffer too large, skipping decode fallback');
+    return { png: buf, isActuallyPng: false };
+  }
+
+  // Fallback A: image-js (your current path)
   try {
     const I = Image as unknown as {
       load: (data: ArrayBuffer | Uint8Array | Buffer) => Promise<{
@@ -87,18 +94,23 @@ async function ensurePng(buf: Buffer): Promise<{ png: Buffer; isActuallyPng: boo
     // continue
   }
 
-  // Fallback B: image-decode → write PNG with pngjs
+  // Fallback B: image-decode → write PNG via pngjs, with timeout
   try {
-    const d = await decode(buf); // { width, height, data (RGBA) }
-    if (d && d.width && d.height && d.data) {
-      const { PNG } = await import('pngjs');
-      const png = new PNG({ width: d.width, height: d.height });
-      png.data.set(d.data);
-      const out = PNG.sync.write(png);
-      return { png: out, isActuallyPng: false };
-    }
-  } catch {
-    // continue
+    const timeout = 1500; // ms
+    const decoded = await Promise.race([
+      decode(buf),                                   // { width, height, data: RGBA }
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('decode_timeout')), timeout)),
+    ]);
+    // @ts-ignore decoded is the resolve of decode(buf)
+    const { width, height, data } = decoded || {};
+    if (!width || !height || !data) throw new Error('decode_bad_output');
+
+    const { PNG } = await import('pngjs');
+    const png = new PNG({ width, height });
+    png.data.set(data);
+    return { png: PNG.sync.write(png), isActuallyPng: false };
+  } catch (e) {
+    console.warn('[DTF] image-decode fallback failed:', e instanceof Error ? e.message : e);
   }
 
   console.warn('[DTF] normalize_fallback_passthrough: could not decode non-PNG');
