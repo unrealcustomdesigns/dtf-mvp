@@ -92,8 +92,10 @@ async function generateBasePngs(
   const model = process.env.NEBIUS_IMAGE_MODEL || 'black-forest-labs/flux-dev';
   if (!key) throw new Error('NEBIUS_API_KEY is missing');
 
-  // silently prefix the prompt
-  const prompt = `Vector style. ${userPrompt}`;
+  // silently prefix the prompt const prompt = `Vector style. ${userPrompt}`;
+  // use the user's prompt verbatim
+const prompt = userPrompt;
+
 
   const size = pickGenSize(Math.max(desiredTrimW, desiredTrimH));
   const accum: Buffer[] = [];
